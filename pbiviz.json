@@ -1,0 +1,26 @@
+{
+    "visual": {
+        "name": "zentrixNetworkGraph",
+        "displayName": "Zentrix Network Graph",
+        "guid": "zentrixNetworkGraph7F3A21C9D4B84E0FA1C6E2B5D8091A3E",
+        "visualClassName": "Visual",
+        "version": "1.0.0.0",
+        "description": "An enterprise network/relationship graph with a deterministic, pinnable layout — the graph that stays put. Clustering, exploration and scale to come.",
+        "supportUrl": "https://zentrixstudio.in/support",
+        "gitHubUrl": "https://github.com/Zentrix-Studio/Network-Graph"
+    },
+    "apiVersion": "5.11.0",
+    "author": {
+        "name": "Zentrix Studio",
+        "email": "support@zentrixstudio.in"
+    },
+    "assets": {
+        "icon": "assets/icon.png"
+    },
+    "externalJS": null,
+    "style": "style/visual.less",
+    "capabilities": "capabilities.json",
+    "dependencies": null,
+    "stringResources": [],
+    "version": "1.0.0.0"
+}

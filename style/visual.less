@@ -1,0 +1,509 @@
+svg.zentrix-network {
+    display: block;
+    width: 100%;
+    height: 100%;
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+
+    // Edges render as <path> (curved/parallel edges); class-based selectors stay
+    // element-agnostic so a future switch back to <line> can't silently un-match.
+    .edges .edge {
+        shape-rendering: geometricPrecision;
+    }
+
+    // Transparent interaction copies widen link hover/click targeting without
+    // changing the visible stroke. They stay a constant screen-space width while
+    // zooming and never participate in paint/opacity styling.
+    .edges .edge-hit,
+    .edges .selfloop-hit {
+        fill: none;
+        stroke: transparent;
+        cursor: pointer;
+    }
+
+    // R2 — animated flow (marching ants source→target). Duration is set inline
+    // per-edge; direction comes from the negative dashoffset target.
+    .edges .edge.flow {
+        animation-name: zx-flow;
+        animation-timing-function: linear;
+        animation-iteration-count: infinite;
+    }
+
+    // R3 — animate node/edge/label geometry when adjustments are enabled. cx/cy…
+    // are animatable presentation attributes in Chromium (Power BI's engine).
+    // NG-112: settle-ease curve (decelerating spring-ish) so nodes read as
+    // "adjusting on their own" — covers every marker type (circle / shape path /
+    // image / icon glyph), self-loops, and the value/measure text under nodes.
+    // The var() fallbacks below are the shipped defaults (550ms settle / 350ms
+    // zoom / 220ms label fade): short enough to preserve directness while still
+    // making structural changes traceable.
+    @settle-ease: cubic-bezier(0.3, 0.9, 0.3, 1);
+    @settle-time: ~"var(--zx-settle, .55s)";
+    @settle-time-r: ~"var(--zx-settle-r, .3s)";
+    &.zx-animated .nodes circle.node,
+    &.zx-animated .nodes circle.node-halo { transition: cx @settle-time @settle-ease, cy @settle-time @settle-ease, r @settle-time-r @settle-ease, fill .25s ease, fill-opacity .22s ease, transform .12s ease-out; }
+    &.zx-animated .nodes path.node,
+    &.zx-animated .nodes image.node,
+    &.zx-animated .nodes text.node { transition: transform @settle-time @settle-ease, fill .3s ease; }
+    &.zx-animated .edges .edge,
+    &.zx-animated .edges .selfloop { transition: d @settle-time @settle-ease, opacity .12s ease; }
+    &.zx-animated .labels text { transition: x @settle-time @settle-ease, y @settle-time @settle-ease; }
+    // Labels, halo rects, and node-value text are REBUILT each repaint (placement is
+    // recomputed), so they can't glide — fade them in as the nodes settle instead of
+    // teleporting. `backwards` holds them invisible through the delay.
+    // Gated by `zx-settle` (NOT `zx-animated`): the settle-in fade REPLAYS every time
+    // these elements are created, so binding it to zx-animated made the labels flash on
+    // every cosmetic gear repaint. zx-settle is applied only on a real data/layout render
+    // (host update()), never on the optimistic rerenderFromSettings() path.
+    &.zx-settle .labels text,
+    &.zx-settle .labels rect,
+    &.zx-settle .node-values text { animation: zx-settle-in ~"var(--zx-label-fade, .22s)" ease ~"var(--zx-label-delay, .3s)" backwards; }
+    // NG-112 — discrete zoom steps (buttons / fit / reset) ease the whole content
+    // group; wheel & pan remove the class before applying, staying 1:1.
+    &.zx-zoom-anim > g.zoom { transition: transform ~"var(--zx-zoom, .35s)" @settle-ease; }
+
+    // First render / Reset all: visual.ts seeds every component at its root and
+    // advances real geometry for 2.4s. Opacity remains CSS-owned so nodes emerge in
+    // hierarchy order while links visibly grow with the moving endpoints.
+    &.zx-enter .nodes .node { animation: zx-node-fade .32s @settle-ease var(--zx-enter-delay, 0ms) backwards; }
+    &.zx-enter .nodes circle.node {
+        animation-name: zx-node-enter;
+        transform-box: fill-box;
+        transform-origin: center;
+    }
+    &.zx-enter.zx-grow .nodes circle.node {
+        animation-name: zx-node-fade;
+        transform: none;
+    }
+    &.zx-enter .edges .edge,
+    &.zx-enter .edges .selfloop,
+    &.zx-enter .edges .arrowhead { animation: zx-edge-enter .22s ease .04s backwards; }
+    // Growth uses one geometry clock. Do not layer separate node/link fades on
+    // top: both endpoints and the connecting path must appear and travel together.
+    &.zx-enter.zx-grow .nodes .node,
+    &.zx-enter.zx-grow .edges .edge,
+    &.zx-enter.zx-grow .edges .selfloop { animation: none; }
+    &.zx-enter.zx-grow .labels,
+    &.zx-enter.zx-grow .node-values,
+    &.zx-enter.zx-grow .edges .edge-label { animation: zx-refresh-detail .28s ease 1.85s backwards; }
+
+    // Data refresh: retained geometry glides via the transitions above, additions
+    // emerge from a retained parent/neighbor, and rebuilt text crossfades near the end.
+    // The 150ms transition delay lets removed ghosts leave before retained geometry
+    // starts moving; additions then appear only as that movement reaches its target.
+    &.zx-refresh.zx-animated .nodes .node,
+    &.zx-refresh.zx-animated .edges .edge,
+    &.zx-refresh.zx-animated .edges .selfloop { transition-delay: .15s; }
+    &.zx-refresh .nodes .node.zx-new-node { animation: zx-node-fade .28s @settle-ease .62s backwards; }
+    &.zx-refresh .nodes circle.node.zx-new-node {
+        animation-name: zx-node-enter;
+        transform-box: fill-box;
+        transform-origin: center;
+    }
+    &.zx-refresh .labels,
+    &.zx-refresh .node-values,
+    &.zx-refresh .edges .edge-label { animation: zx-refresh-detail .22s ease .58s backwards; }
+    // Arrowheads are a separate top layer. Keep them hidden until the retained edge
+    // paths finish their 150ms delay + 550ms settle, otherwise a data filter briefly
+    // exposes detached triangles at the new endpoints while the lines are still moving.
+    &.zx-refresh .edges .arrowlayer { animation: zx-refresh-detail .18s ease .72s backwards; }
+
+    // Real layout tween (NG-156): visual.ts writes an intermediate position on every
+    // requestAnimationFrame tick. Disable competing CSS geometry transitions while
+    // that clock is active, otherwise Chromium eases each individual tick and the
+    // graph appears stuck until it jumps to the destination. Arrowheads are rebuilt
+    // at the final geometry and stay hidden while their owning paths travel.
+    &.zx-motion-tween.zx-animated .nodes circle.node,
+    &.zx-motion-tween.zx-animated .nodes circle.node-halo,
+    &.zx-motion-tween.zx-animated .nodes path.node,
+    &.zx-motion-tween.zx-animated .nodes image.node,
+    &.zx-motion-tween.zx-animated .nodes text.node,
+    &.zx-motion-tween.zx-animated .edges .edge,
+    &.zx-motion-tween.zx-animated .edges .selfloop,
+    &.zx-motion-tween.zx-animated .labels text,
+    &.zx-motion-tween.zx-animated .labels rect,
+    &.zx-motion-tween.zx-animated .node-values text { transition: none !important; }
+    &.zx-motion-tween .edges .arrowlayer {
+        visibility: hidden;
+        animation: none !important;
+    }
+
+    // Hierarchy folding: a parent click makes the structural change readable instead
+    // of teleporting descendants. Outgoing nodes contract/fade before the subtree is
+    // hidden; expanding descendants grow/fade into the already-computed positions.
+    .nodes .node.zx-fold-out { animation: zx-fold-fade-out .22s ease-in forwards !important; }
+    .nodes .node.zx-fold-in { animation: zx-fold-fade-in .25s ease-out backwards !important; }
+    .nodes circle.node.zx-fold-out {
+        transform-box: fill-box;
+        transform-origin: center;
+        animation-name: zx-fold-node-out !important;
+    }
+    .nodes circle.node.zx-fold-in {
+        transform-box: fill-box;
+        transform-origin: center;
+        animation-name: zx-fold-node-in !important;
+    }
+    .edges .zx-fold-out,
+    .labels .zx-fold-out,
+    .node-values .zx-fold-out { animation: zx-fold-fade-out .22s ease-in forwards !important; }
+    .edges .zx-fold-in,
+    .labels .zx-fold-in,
+    .node-values .zx-fold-in { animation: zx-fold-fade-in .25s ease-out backwards !important; }
+    .fold-indicators .fold-indicator {
+        animation: zx-fold-indicator-in .2s @settle-ease backwards;
+        transform-box: fill-box;
+        transform-origin: center;
+        filter: drop-shadow(0 1px 2px rgba(20, 23, 50, .24));
+    }
+
+    // Semantic zoom keeps secondary detail mounted and crossfades it at the LOD
+    // threshold—no graph repaint and no label pop.
+    .labels,
+    .node-values { transition: opacity .16s ease; }
+    .labels.zx-lod-hidden,
+    .node-values.zx-lod-hidden { opacity: 0; pointer-events: none; }
+
+    // While dragging, geometry must track the pointer 1:1 — kill the R3 easing so the
+    // dragged node doesn't lag behind its (per-frame) edges. Overrides zx-animated.
+    &.zx-dragging .nodes circle.node,
+    &.zx-dragging .nodes circle.node-halo,
+    &.zx-dragging .nodes path.node,
+    &.zx-dragging .nodes image.node,
+    &.zx-dragging .nodes text.node,
+    &.zx-dragging .edges .edge,
+    &.zx-dragging .edges .selfloop,
+    &.zx-dragging .labels text,
+    &.zx-dragging .labels rect,
+    &.zx-dragging .node-values text { transition: none !important; animation: none !important; }
+    &.zx-dragging .nodes circle.node.zx-drag-root {
+        transform-box: fill-box;
+        transform-origin: center;
+        transform: scale(1.05);
+        filter: drop-shadow(0 0 9px rgba(124, 92, 255, .7)) !important;
+    }
+    &.zx-dragging .edges.zx-drag-edges-active path.edge,
+    &.zx-dragging .edges.zx-drag-edges-active path.selfloop { opacity: .18; }
+    &.zx-dragging .edges.zx-drag-edges-active path.zx-drag-edge { opacity: 1; }
+    // Live drag recomputes edge lines every pointer frame; heads are rebuilt on drop.
+    // Hiding this tiny layer avoids stale, detached triangles during the gesture.
+    &.zx-dragging .edges .arrowlayer { display: none; }
+
+    .nodes circle.node {
+        cursor: pointer;
+        transition: fill-opacity 0.12s ease;
+
+        &:focus {
+            outline: none;
+            stroke-width: 2px;
+        }
+        &:focus-visible {
+            outline: none;
+            stroke-width: 2px;
+        }
+    }
+
+    .labels text {
+        user-select: none;
+    }
+}
+
+.zx-tooltip,
+.zx-landing,
+.zx-pin {
+    box-sizing: border-box;
+}
+
+// NG-113 — redesigned floating chrome (quick-action card + Graph/Table pill).
+// Hover feedback only; the resting styles are inline so they theme per surface.
+.zx-actions .zx-action:hover:not(:disabled) {
+    background: rgba(124, 92, 255, 0.10);
+}
+.zx-actions .zx-export-option:hover,
+.zx-actions .zx-export-option:focus-visible {
+    background: rgba(124, 92, 255, 0.10) !important;
+    outline: none;
+}
+.zx-view .zx-view-seg {
+    transition: background 0.15s ease, color 0.15s ease;
+}
+.zx-view .zx-view-seg[aria-pressed="false"]:hover {
+    background: rgba(124, 92, 255, 0.10);
+}
+
+// Enterprise analysis overlay — a single card with a global header and aligned
+// form grid. Theme colours are supplied as custom properties by EnterprisePanel.
+.zx-enterprise {
+    .zx-enterprise-head {
+        height: 42px;
+        padding: 0 10px 0 14px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        box-sizing: border-box;
+        border-bottom: 1px solid var(--zx-ep-separator);
+        position: sticky;
+        top: 0;
+        z-index: 2;
+        background: var(--zx-ep-card);
+    }
+    .zx-enterprise-identity {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+    }
+    .zx-enterprise-mark,
+    .zx-enterprise-section-icon {
+        display: grid;
+        place-items: center;
+        flex: none;
+        color: var(--zx-ep-accent);
+        background: var(--zx-ep-accent-soft);
+    }
+    .zx-enterprise-mark {
+        width: 24px;
+        height: 24px;
+        border-radius: 7px;
+    }
+    .zx-enterprise-title {
+        overflow: hidden;
+        color: var(--zx-ep-muted);
+        font: 650 10px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+        letter-spacing: .085em;
+        text-transform: uppercase;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .zx-enterprise-close {
+        width: 28px;
+        height: 28px;
+        padding: 0;
+        display: grid;
+        place-items: center;
+        border: 0;
+        border-radius: 8px;
+        background: transparent;
+        color: var(--zx-ep-muted);
+        cursor: pointer;
+        transition: color .14s ease, background .14s ease, transform .14s ease;
+
+        &:hover {
+            color: var(--zx-ep-accent);
+            background: var(--zx-ep-accent-soft);
+        }
+        &:active { transform: scale(.94); }
+        &:focus-visible {
+            outline: 2px solid var(--zx-ep-accent);
+            outline-offset: 1px;
+        }
+    }
+    .zx-enterprise-section {
+        padding: 12px 14px 13px;
+        border-bottom: 1px solid var(--zx-ep-separator);
+        box-sizing: border-box;
+
+        &:last-child { border-bottom: 0; }
+    }
+    .zx-enterprise-section-head {
+        min-height: 22px;
+        margin-bottom: 9px;
+        display: flex;
+        align-items: center;
+        gap: 7px;
+    }
+    .zx-enterprise-section-icon {
+        width: 22px;
+        height: 22px;
+        border-radius: 6px;
+    }
+    .zx-enterprise-section-title {
+        color: var(--zx-ep-muted);
+        font: 700 10.5px/1.2 var(--zx-font, "Inter", system-ui, sans-serif);
+        letter-spacing: .065em;
+        text-transform: uppercase;
+    }
+    .zx-enterprise-search {
+        position: relative;
+    }
+    .zx-enterprise-search-icon {
+        position: absolute;
+        left: 10px;
+        top: 50%;
+        z-index: 1;
+        color: var(--zx-ep-muted);
+        pointer-events: none;
+        transform: translateY(-50%);
+    }
+    .zx-enterprise-search .zx-enterprise-control {
+        width: 100%;
+        padding-left: 32px;
+        padding-right: 28px;
+    }
+    .zx-enterprise-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 118px;
+        align-items: center;
+        gap: 10px;
+        margin-top: 7px;
+
+        &:first-of-type { margin-top: 0; }
+    }
+    .zx-enterprise-label {
+        overflow: hidden;
+        color: var(--zx-ep-text);
+        font: 500 12px/1.25 var(--zx-font, "Inter", system-ui, sans-serif);
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .zx-enterprise-control {
+        width: 100%;
+        height: 34px;
+        min-width: 0;
+        padding: 0 9px;
+        box-sizing: border-box;
+        border: 1px solid var(--zx-ep-border);
+        border-radius: 8px;
+        outline: none;
+        background: var(--zx-ep-field);
+        color: var(--zx-ep-text);
+        font: 500 12px var(--zx-font, "Inter", system-ui, sans-serif);
+        transition: border-color .14s ease, box-shadow .14s ease, background .14s ease;
+
+        &:hover { border-color: var(--zx-ep-accent); }
+        &:focus {
+            border-color: var(--zx-ep-accent);
+            box-shadow: 0 0 0 3px var(--zx-ep-accent-soft);
+            background: var(--zx-ep-card);
+        }
+        &::placeholder {
+            color: var(--zx-ep-muted);
+            opacity: .78;
+        }
+    }
+    .zx-enterprise-status {
+        margin-top: 8px;
+        color: var(--zx-ep-muted);
+        font: 450 10.5px/1.45 var(--zx-font, "Inter", system-ui, sans-serif);
+
+        &:empty { display: none; }
+    }
+
+    // A narrow visual keeps the controls usable by stacking the form grid; a
+    // short visual tightens vertical rhythm. The card itself has a max-height and
+    // scrolls while the sticky global header/close action remains reachable.
+    &[data-narrow="true"] {
+        .zx-enterprise-head { padding-left: 10px; }
+        .zx-enterprise-section { padding-left: 10px; padding-right: 10px; }
+        .zx-enterprise-row {
+            grid-template-columns: minmax(0, 1fr);
+            gap: 5px;
+            margin-top: 9px;
+        }
+    }
+    &[data-short="true"] {
+        .zx-enterprise-head { height: 38px; }
+        .zx-enterprise-section { padding-top: 9px; padding-bottom: 10px; }
+        .zx-enterprise-section-head { margin-bottom: 7px; }
+        .zx-enterprise-control { height: 32px; }
+    }
+}
+
+@keyframes zx-flow {
+    to { stroke-dashoffset: -22; }
+}
+
+// NG-112 — rebuilt labels/values fade in as the nodes finish settling.
+@keyframes zx-settle-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+@keyframes zx-node-enter {
+    from { opacity: 0; transform: scale(.82); }
+    to { opacity: 1; transform: scale(1); }
+}
+@keyframes zx-node-fade {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+@keyframes zx-edge-enter {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+@keyframes zx-refresh-detail {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+@keyframes zx-motion-remove {
+    from { opacity: 1; transform: scale(1); }
+    to { opacity: 0; transform: scale(.72); }
+}
+@keyframes zx-motion-edge-remove {
+    from { opacity: 1; }
+    to { opacity: 0; }
+}
+.motion-ghosts .zx-motion-removed {
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: zx-motion-remove .18s ease-in forwards;
+}
+.motion-ghosts .zx-motion-edge-removed {
+    animation: zx-motion-edge-remove .15s ease-in forwards;
+}
+.zentrix-network-canvas.zx-canvas-enter { animation: zx-edge-enter .25s ease backwards; }
+.zentrix-network-canvas.zx-canvas-refresh { animation: zx-refresh-detail .22s ease backwards; }
+.zentrix-network-canvas.zx-fold-out { animation: zx-fold-fade-out .24s ease-in forwards; }
+.zentrix-network-canvas.zx-fold-in { animation: zx-fold-fade-in .25s ease-out backwards; }
+
+@keyframes zx-fold-node-out {
+    from { opacity: 1; transform: scale(1); }
+    to { opacity: 0; transform: scale(.62); }
+}
+@keyframes zx-fold-node-in {
+    from { opacity: 0; transform: scale(.62); }
+    to { opacity: 1; transform: scale(1); }
+}
+@keyframes zx-fold-fade-out {
+    from { opacity: 1; }
+    to { opacity: 0; }
+}
+@keyframes zx-fold-fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+@keyframes zx-fold-indicator-in {
+    from { opacity: 0; transform: scale(.45); }
+    to { opacity: 1; transform: scale(1); }
+}
+
+// Respect the OS reduced-motion preference — no marching-ants, no settle easing.
+@media (prefers-reduced-motion: reduce) {
+    svg.zentrix-network .edges .edge.flow { animation: none; }
+    svg.zentrix-network.zx-animated .nodes circle.node,
+    svg.zentrix-network.zx-animated .nodes circle.node-halo,
+    svg.zentrix-network.zx-animated .nodes path.node,
+    svg.zentrix-network.zx-animated .nodes image.node,
+    svg.zentrix-network.zx-animated .nodes text.node,
+    svg.zentrix-network.zx-animated .edges .edge,
+    svg.zentrix-network.zx-animated .edges .selfloop,
+    svg.zentrix-network.zx-animated .labels text { transition: none; }
+    svg.zentrix-network.zx-settle .labels text,
+    svg.zentrix-network.zx-settle .labels rect,
+    svg.zentrix-network.zx-settle .node-values text { animation: none; }
+    svg.zentrix-network.zx-zoom-anim > g.zoom { transition: none; }
+    svg.zentrix-network.zx-enter .nodes .node,
+    svg.zentrix-network.zx-enter .edges .edge,
+    svg.zentrix-network.zx-enter .edges .selfloop,
+    svg.zentrix-network.zx-enter .edges .arrowhead,
+    svg.zentrix-network.zx-refresh .nodes .node.zx-new-node,
+    svg.zentrix-network.zx-refresh .labels,
+    svg.zentrix-network.zx-refresh .node-values,
+    svg.zentrix-network .motion-ghosts *,
+    svg.zentrix-network .zx-fold-in,
+    svg.zentrix-network .zx-fold-out,
+    svg.zentrix-network .fold-indicator { animation: none !important; }
+    svg.zentrix-network .labels,
+    svg.zentrix-network .node-values { transition: none; }
+    .zentrix-network-canvas.zx-canvas-enter,
+    .zentrix-network-canvas.zx-canvas-refresh,
+    .zentrix-network-canvas.zx-fold-in,
+    .zentrix-network-canvas.zx-fold-out { animation: none; }
+}
