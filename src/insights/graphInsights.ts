@@ -94,9 +94,18 @@ export function computeInsights(model: GraphModel): Insight[] {
  * ──────────────────────────────────────────────────────────────────────── */
 
 export interface NarrativeLine { text: string; tone: InsightTone; strong?: boolean }
+/** An optional graph action a card's headline metric triggers on click (NG-252).
+ *  All actions are transient/session-local — they never rewrite saved settings:
+ *  focus an entity's ego network, preview a colouring, or highlight the structural-
+ *  bridge edge set. Identities travel as natural keys so the render layer maps them
+ *  back onto the live model deterministically (no indices baked at narrative time). */
+export type InsightAction =
+    | { kind: "focusNode"; nodeKey: string }
+    | { kind: "colorBy"; mode: "cluster" | "component" }
+    | { kind: "highlightBridges"; pairs: [string, string][] };
 /** A card. `metric` is the visually-prominent headline number (value + label,
- *  optional sub-line); `lines` carry the supporting explanation beneath it. */
-export interface NarrativeMetric { value: string; label: string; sub?: string; tone: InsightTone }
+ *  optional sub-line, optional click `action`); `lines` carry the explanation. */
+export interface NarrativeMetric { value: string; label: string; sub?: string; tone: InsightTone; action?: InsightAction }
 export interface NarrativeSection { title: string; metric?: NarrativeMetric; lines: NarrativeLine[] }
 /** `subhead` is the small metadata line under the (now insight-oriented) headline. */
 export interface GraphNarrative { headline: string; subhead?: string; sections: NarrativeSection[] }
@@ -135,7 +144,7 @@ function median(values: number[]): number {
 /**
  * Build the plain-English narrative for a graph. Returns an insight-oriented
  * headline (+ a metadata subhead) plus ordered cards, each led by a prominent
- * metric: Overview, Components, Key players, Communities, Critical connections,
+ * metric: Overview, Components, Key players, Communities, Structural bridges,
  * Network structure. Empty graphs yield just an explanatory headline, no cards.
  * Pure + deterministic for the same DataView (fixed node/edge order throughout).
  */
@@ -169,18 +178,34 @@ export function computeNarrative(model: GraphModel): GraphNarrative {
         + (excluded > 0 ? ` · ${num(uniquePairs)} unique links analysed` : "");
 
     // --- Overview (avg + median degree) -------------------------------------
-    const degrees = model.nodes.map((nd) => nd.degree);
+    // Degree here is the UNIQUE-NEIGHBOUR count (simple undirected basis), NOT
+    // model.node.degree, which counts directed edge records for the directed Table.
+    // On the record basis a reciprocal A→B / B→A pair double-counts the neighbour, so
+    // "average connections per entity" could exceed n−1 and disagree with the
+    // "unique relationships" and density numbers shown in the same view (NG-251).
+    const degrees = undirectedDegrees(model);
     const totalDegree = degrees.reduce((c, d) => c + d, 0);
     const avgDegree = totalDegree / n;
     const medDegree = median(degrees);
-    const overview: NarrativeLine[] = [{
+    const leaves = degrees.filter((d) => d === 1).length;
+    const overview: NarrativeLine[] = [];
+    // Lead with interpretation, not a restatement of the visible counts (the counts
+    // already live in the subhead): when most entities hang off a single link, that's
+    // a low-redundancy structure worth naming — it's what the numbers actually mean.
+    if (n >= 4 && leaves / n >= 0.3) {
+        overview.push({
+            text: `Low redundancy — ${pct1(leaves, n)} of entities connect through just one relationship, so losing that single link cuts them off entirely. Much of the network hinges on individual relationships with no backup route.`,
+            tone: "neutral", strong: true,
+        });
+    }
+    overview.push({
         text: `The network contains ${num(n)} ${n === 1 ? "entity" : "entities"} and ${num(uniquePairs)} unique ${uniquePairs === 1 ? "relationship" : "relationships"}.`,
         tone: "neutral",
     }, {
         // Median alongside the average — a few hubs can pull the mean well above typical.
         text: `Median connections: ${fmtStat(medDegree)} per entity — half of all entities have ${fmtStat(medDegree)} or fewer.`,
         tone: "neutral",
-    }];
+    });
     if (excluded > 0) {
         overview.push({
             text: `${num(records)} relationship records were provided; ${num(excluded)} were duplicate or self-links, leaving ${num(uniquePairs)} unique entity-to-entity links to analyse.`,
@@ -205,7 +230,8 @@ export function computeNarrative(model: GraphModel): GraphNarrative {
         compMetric = { value: "1", label: "connected network", tone: "positive" };
         connectivity.push({ text: `Everything hangs together as one connected web — you can trace a path between any two of the ${num(n)} entities.`, tone: "positive", strong: true });
     } else {
-        compMetric = { value: pct1(largest, n), label: "of entities in the largest group", tone: "negative" };
+        // Clicking recolours the graph by component so the separate groups pop out.
+        compMetric = { value: pct1(largest, n), label: "of entities in the largest group", tone: "negative", action: { kind: "colorBy", mode: "component" } };
         // Describe the remainder honestly rather than only the largest.
         const otherCount = model.componentCount - 1;
         const otherSizes = sizes.slice().sort((a, b) => b - a).slice(1); // all but the largest
@@ -229,18 +255,21 @@ export function computeNarrative(model: GraphModel): GraphNarrative {
     sections.push({ title: "Components", metric: compMetric, lines: connectivity });
 
     // --- Key players (most connected vs. best connector vs. most critical) --
-    const order = model.nodes.map((_, i) => i).sort((a, b) => model.nodes[b].degree - model.nodes[a].degree || a - b);
+    // "Most connected" ranks by unique-neighbour degree (same basis as the counts
+    // above), so a node's stated "direct links" can never exceed n−1 (NG-251).
+    const order = model.nodes.map((_, i) => i).sort((a, b) => degrees[b] - degrees[a] || a - b);
     const hub = order[0];
     const players: NarrativeLine[] = [];
     let playersMetric: NarrativeMetric;
-    if (model.nodes[hub].degree > 0) {
-        playersMetric = { value: num(model.nodes[hub].degree), label: `direct connections — ${model.nodes[hub].key} leads`, tone: "neutral" };
+    if (degrees[hub] > 0) {
+        // Clicking focuses the hub's ego network (zoom in, neighbours kept, rest fade).
+        playersMetric = { value: num(degrees[hub]), label: `direct connections — ${model.nodes[hub].key} leads`, tone: "neutral", action: { kind: "focusNode", nodeKey: model.nodes[hub].key } };
         const second = order[1];
-        const secondClause = (second != null && model.nodes[second].degree > 0)
-            ? ` ${model.nodes[second].key} follows with ${num(model.nodes[second].degree)}.`
+        const secondClause = (second != null && degrees[second] > 0)
+            ? ` ${model.nodes[second].key} follows with ${num(degrees[second])}.`
             : "";
         players.push({
-            text: `${model.nodes[hub].key} is the most connected entity, with ${num(model.nodes[hub].degree)} direct ${model.nodes[hub].degree === 1 ? "link" : "links"}.${secondClause}`,
+            text: `${model.nodes[hub].key} is the most connected entity, with ${num(degrees[hub])} direct ${degrees[hub] === 1 ? "link" : "links"}.${secondClause}`,
             tone: "neutral", strong: true,
         });
         // Best connector — highest betweenness (sits on the most shortest paths).
@@ -271,18 +300,28 @@ export function computeNarrative(model: GraphModel): GraphNarrative {
     const communitySection = buildCommunitySection(model, n);
     if (communitySection) sections.push(communitySection);
 
-    // --- Critical connections (bridges) -------------------------------------
+    // --- Structural bridges -------------------------------------------------
+    // "Bridge" is the precise graph term (removing it raises the component count);
+    // "critical" alone overstates what topology proves, so the business reading is a
+    // separate, softer line rather than baked into the label.
     const fragility: NarrativeLine[] = [];
     let bridgeMetric: NarrativeMetric;
     if (bridges.length === 0) {
-        bridgeMetric = { value: "0", label: "critical relationships", sub: "none — a resilient structure", tone: "positive" };
-        fragility.push({ text: "No single relationship is holding the network together — losing any one link won't break it apart. That's a resilient structure.", tone: "positive" });
+        bridgeMetric = { value: "0", label: "structural bridges", sub: "none — a resilient structure", tone: "positive" };
+        fragility.push({ text: "No single relationship is holding the network together — losing any one link won't split it apart. That's a resilient structure.", tone: "positive" });
     } else {
         const share = pct1(bridges.length, uniquePairs);
-        bridgeMetric = { value: num(bridges.length), label: "critical relationships", sub: `${share} of analysed links`, tone: "negative" };
+        // Clicking highlights exactly these bridge links on the graph (pairs by key so
+        // the render layer maps them back to every matching link record).
+        const bridgePairs = bridges.map(([a, b]) => [model.nodes[a].key, model.nodes[b].key] as [string, string]);
+        bridgeMetric = { value: num(bridges.length), label: "structural bridges", sub: `${share} of analysed links`, tone: "negative", action: { kind: "highlightBridges", pairs: bridgePairs } };
         fragility.push({
-            text: `${num(bridges.length)} ${bridges.length === 1 ? "relationship is a bridge" : "relationships are bridges"}: removing any one would disconnect part of its current group. They represent ${share} of the ${num(uniquePairs)} analysed relationships — potential operational or communication bottlenecks.`,
+            text: `${num(bridges.length)} ${bridges.length === 1 ? "relationship is a structural bridge" : "relationships are structural bridges"}: removing any one would split part of the network into separate groups. They are ${share} of the ${num(uniquePairs)} analysed relationships.`,
             tone: "negative", strong: true,
+        });
+        fragility.push({
+            text: "Potential points of failure — each of these links carries flow with no alternative route, so it's a single point of failure for the two sides it joins.",
+            tone: "neutral",
         });
         const b = bridges[0];
         fragility.push({
@@ -290,7 +329,7 @@ export function computeNarrative(model: GraphModel): GraphNarrative {
             tone: "neutral",
         });
     }
-    sections.push({ title: "Critical connections", metric: bridgeMetric, lines: fragility });
+    sections.push({ title: "Structural bridges", metric: bridgeMetric, lines: fragility });
 
     // --- Network structure (density) ----------------------------------------
     const possible = (n * (n - 1)) / 2;
@@ -299,20 +338,31 @@ export function computeNarrative(model: GraphModel): GraphNarrative {
         text: `Only ${pct1(uniquePairs, possible)} of all possible relationships exist — ${num(uniquePairs)} of ${num(possible)} possible links are present.`,
         tone: "neutral",
     }];
+    // Density alone means little without size/domain context, so interpret rather
+    // than slap on an absolute label. Anything under ~15% of possible links is a
+    // low-density structure that leans on a few relationships, not broad redundancy.
+    let structureSub: string | undefined;
     if (densityPct < 5) {
         // Sparse is normal at scale — say so, don't imply it's a weakness.
+        structureSub = "a sparse network";
         structureLines.push({
-            text: "This is a sparse network. Low density is normal for large real-world networks and doesn't by itself indicate a weak or unhealthy structure.",
+            text: "The network is sparse — most entities are connected through a small number of relationships. Low density is normal for large real-world networks and doesn't by itself indicate a weak or unhealthy structure.",
             tone: "neutral",
         });
-    } else if (densityPct < 25) {
-        structureLines.push({ text: "This is a moderately connected network.", tone: "neutral" });
+    } else if (densityPct < 15) {
+        structureSub = "a low-density network";
+        structureLines.push({
+            text: "Low-density network — most entities are connected through a small number of relationships rather than broad redundancy, so the structure leans on a few key links.",
+            tone: "neutral",
+        });
+    } else if (densityPct < 30) {
+        structureLines.push({ text: "This is a moderately connected network — a fair share of the possible relationships are present.", tone: "neutral" });
     } else {
         structureLines.push({ text: "This is a densely connected network — most entities that could be linked are.", tone: "neutral" });
     }
     sections.push({
         title: "Network structure",
-        metric: { value: pct1(uniquePairs, possible), label: "of possible links exist", sub: densityPct < 5 ? "a sparse network" : undefined, tone: "neutral" },
+        metric: { value: pct1(uniquePairs, possible), label: "of possible links exist", sub: structureSub, tone: "neutral" },
         lines: structureLines,
     });
 
@@ -373,31 +423,68 @@ function topArticulation(model: GraphModel): number | null {
 function buildCommunitySection(model: GraphModel, n: number): NarrativeSection | null {
     if (n < 3) return null;
     const { community, count } = detectCommunities(model);
-    if (count <= 1) {
-        return {
-            title: "Communities",
-            metric: { value: "1", label: "community — no clear sub-groups", tone: "neutral" },
-            lines: [{ text: "The network forms a single tightly-knit community; no distinct sub-groups stand out.", tone: "neutral" }],
-        };
-    }
     const sizes = new Array<number>(count).fill(0);
     for (const c of community) sizes[c]++;
     const sorted = sizes.slice().sort((a, b) => b - a);
+    // A lone node is its own Louvain community, but it is NOT a "closely-connected
+    // community" — describing it as one is false and inflates the count (NG-251).
+    // Count only genuine multi-node groups; surface the loners separately (the
+    // Components card already flags them), consistent with the rest of the view.
+    const singletons = sorted.filter((s) => s === 1).length;
+    const realCount = count - singletons;
+    if (realCount <= 1) {
+        const lead = realCount === 1 && singletons === 0
+            ? "The network forms a single tightly-knit community; no distinct sub-groups stand out."
+            : `The network doesn't split into distinct communities — ${singletons > 0 ? `${num(singletons)} ${singletons === 1 ? "entity stands" : "entities stand"} on their own and the rest form one loosely-knit group` : "it reads as one loosely-knit group"}.`;
+        return {
+            title: "Communities",
+            metric: { value: "1", label: "community — no clear sub-groups", tone: "neutral" },
+            lines: [{ text: lead, tone: "neutral" }],
+        };
+    }
     const largest = sorted[0];
-    const topK = Math.min(3, count);
+    const topK = Math.min(3, realCount);
     const topShare = sorted.slice(0, topK).reduce((s, v) => s + v, 0);
     const lines: NarrativeLine[] = [{
-        text: `The network divides into ${num(count)} closely-connected communities — clusters of entities more tied to each other than to the rest (think departments, interest groups, or operational silos).`,
+        text: `The network divides into ${num(realCount)} closely-connected communities — clusters of entities more tied to each other than to the rest (think departments, interest groups, or operational silos).`,
         tone: "neutral", strong: true,
     }, {
         text: `The largest community holds ${num(largest)} ${largest === 1 ? "entity" : "entities"}; the top ${topK === 1 ? "community accounts" : `${topK} account`} for ${pct1(topShare, n)} of the network.`,
         tone: "neutral",
     }];
+    // Interpret the concentration, don't just state it: is the network dominated by a
+    // few clusters, or spread evenly? That's the "so what" an analyst would report.
+    if (realCount >= 3) {
+        lines.push(topShare / n >= 0.6
+            ? { text: `Activity is concentrated — the top ${topK === 1 ? "cluster holds" : `${topK} clusters hold`} most of the network, suggesting it revolves around a few groups rather than being distributed evenly across all ${num(realCount)} communities.`, tone: "neutral" }
+            : { text: `The network is fairly evenly distributed across its ${num(realCount)} communities, with no single cluster dominating.`, tone: "neutral" });
+    }
+    if (singletons > 0) {
+        lines.push({
+            text: `${num(singletons)} ${singletons === 1 ? "entity belongs" : "entities belong"} to no community, sitting outside these groups entirely.`,
+            tone: "neutral",
+        });
+    }
     return {
         title: "Communities",
-        metric: { value: num(count), label: "closely-connected communities", tone: "neutral" },
+        // Clicking previews community colouring so the clusters are visible on the graph.
+        metric: { value: num(realCount), label: "closely-connected communities", tone: "neutral", action: { kind: "colorBy", mode: "cluster" } },
         lines,
     };
+}
+
+/** Unique-neighbour degree per node — the simple undirected basis the narrative
+ *  uses everywhere (matches countUniquePairs / density / bridges). Distinct from
+ *  model.node.degree, which counts directed edge records for the directed Table, and
+ *  would double-count a reciprocal A→B / B→A pair. Self-loops excluded. */
+function undirectedDegrees(model: GraphModel): number[] {
+    const nb = model.nodes.map(() => new Set<number>());
+    for (const l of model.links) {
+        if (l.source === l.target) continue;
+        nb[l.source].add(l.target);
+        nb[l.target].add(l.source);
+    }
+    return nb.map((s) => s.size);
 }
 
 /** Distinct undirected node pairs that share at least one edge. */
@@ -468,16 +555,37 @@ function findArticulationPoints(model: GraphModel): number[] {
     return out;
 }
 
+/** Per-node articulation-point flags (NG-253): true where removing the node would
+ *  disconnect part of its component. Exported for the Table's "Critical" column so it
+ *  reuses the same Tarjan pass the narrative uses. Deterministic. */
+export function articulationFlags(model: GraphModel): boolean[] {
+    const flags = new Array<boolean>(model.nodes.length).fill(false);
+    for (const i of findArticulationPoints(model)) flags[i] = true;
+    return flags;
+}
+
 /** Tarjan bridge-finding. Returns bridge edges as [uIndex, vIndex] pairs. */
 function findBridges(model: GraphModel): [number, number][] {
     const n = model.nodes.length;
-    // Adjacency of {to, edgeId}, self-loops excluded.
+    // Bridges run on the SAME simple undirected graph every other metric uses —
+    // the set of unique entity-to-entity pairs (see countUniquePairs), self-loops
+    // excluded. Parallel and reciprocal records (A→B twice, or A→B and B→A) collapse
+    // to ONE analysed link, so each unique pair contributes exactly one edge here.
+    // This keeps the tree identity honest: a connected graph of N nodes / N-1 unique
+    // links is a tree, so every one of those links must read as a bridge. Treating a
+    // reciprocal pair as two parallel edges (never a bridge) is what silently
+    // under-counted bridges against the unique-links framing the UI already commits to.
     const adj: { to: number; id: number }[][] = model.nodes.map(() => []);
-    model.links.forEach((l, id) => {
-        if (l.source === l.target) return;
+    const pairId = new Map<string, number>();
+    for (const l of model.links) {
+        if (l.source === l.target) continue;
+        const key = l.source < l.target ? `${l.source}-${l.target}` : `${l.target}-${l.source}`;
+        if (pairId.has(key)) continue; // already have this unique pair as one edge
+        const id = pairId.size;
+        pairId.set(key, id);
         adj[l.source].push({ to: l.target, id });
         adj[l.target].push({ to: l.source, id });
-    });
+    }
 
     const disc = new Array<number>(n).fill(-1);
     const low = new Array<number>(n).fill(0);

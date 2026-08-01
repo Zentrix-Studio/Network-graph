@@ -18,22 +18,32 @@ import { GraphModel } from "./graphTypes";
 
 export type CentralityMetric = "none" | "degree" | "betweenness" | "closeness" | "pagerank";
 
-/** Undirected adjacency (self-loops dropped) — for betweenness/closeness/degree. */
+/**
+ * Undirected adjacency (self-loops dropped, parallel/reciprocal edges collapsed to a
+ * single neighbour) — the simple-graph basis every structural metric shares, so
+ * betweenness/closeness/degree agree with the unique-links count, density and bridges.
+ * Without the dedup a reciprocal A→B / B→A pair (the normal way undirected data is
+ * stored) double-counts shortest paths and neighbours, fabricating "strongest
+ * connector" / "most connected" claims from a duplicate row (NG-251). Neighbour lists
+ * are returned in ascending index order for deterministic BFS traversal.
+ */
 function undirectedAdjacency(model: GraphModel): number[][] {
-    const adj: number[][] = model.nodes.map(() => []);
+    const nb = model.nodes.map(() => new Set<number>());
     for (const l of model.links) {
         if (l.source === l.target) continue;
-        adj[l.source].push(l.target);
-        adj[l.target].push(l.source);
+        nb[l.source].add(l.target);
+        nb[l.target].add(l.source);
     }
-    return adj;
+    return nb.map((s) => [...s].sort((a, b) => a - b));
 }
 
-/** Degree centrality, normalised by (n-1) so it is comparable across graph sizes. */
+/** Degree centrality = unique neighbours / (n-1), comparable across graph sizes.
+ *  Uses the deduped adjacency (not model.node.degree, which counts directed records),
+ *  so a reciprocal pair never pushes a node above 1.0 (NG-251). */
 export function degreeCentrality(model: GraphModel): number[] {
     const n = model.nodes.length;
     const denom = n > 1 ? n - 1 : 1;
-    return model.nodes.map((nd) => nd.degree / denom);
+    return undirectedAdjacency(model).map((neighbours) => neighbours.length / denom);
 }
 
 /**
@@ -159,18 +169,31 @@ export function edgeBetweenness(model: GraphModel, maxNodes = 2000): number[] | 
     const n = model.nodes.length;
     if (n > maxNodes) return null;
     const m = model.links.length;
-    // Adjacency carrying the link index, self-loops excluded.
-    const adj: { to: number; li: number }[][] = model.nodes.map(() => []);
+    // Collapse parallel/reciprocal records to ONE undirected edge per unique pair, so a
+    // duplicated relationship isn't split across two half-scored copies (matches the
+    // unique-links basis bridges/density use). Each pair gets a stable pair-id; the
+    // final score is mapped back onto every link record belonging to that pair, so both
+    // directions of a reciprocal edge show the same, correct value (NG-251).
+    const pairId = new Map<string, number>();
+    const linkPair = new Array<number>(m).fill(-1);
+    const adj: { to: number; pid: number }[][] = model.nodes.map(() => []);
     model.links.forEach((l, li) => {
         if (l.source === l.target) return;
-        adj[l.source].push({ to: l.target, li });
-        adj[l.target].push({ to: l.source, li });
+        const key = l.source < l.target ? `${l.source}-${l.target}` : `${l.target}-${l.source}`;
+        let pid = pairId.get(key);
+        if (pid === undefined) {
+            pid = pairId.size;
+            pairId.set(key, pid);
+            adj[l.source].push({ to: l.target, pid });
+            adj[l.target].push({ to: l.source, pid });
+        }
+        linkPair[li] = pid;
     });
 
-    const ce = new Array<number>(m).fill(0);
+    const cp = new Array<number>(pairId.size).fill(0);   // score per unique undirected pair
     for (let s = 0; s < n; s++) {
         const stack: number[] = [];
-        const pred: { v: number; li: number }[][] = model.nodes.map(() => []);
+        const pred: { v: number; pid: number }[][] = model.nodes.map(() => []);
         const sigma = new Array<number>(n).fill(0); sigma[s] = 1;
         const dist = new Array<number>(n).fill(-1); dist[s] = 0;
         const queue: number[] = [s];
@@ -179,7 +202,7 @@ export function edgeBetweenness(model: GraphModel, maxNodes = 2000): number[] | 
             stack.push(v);
             for (const e of adj[v]) {
                 if (dist[e.to] < 0) { dist[e.to] = dist[v] + 1; queue.push(e.to); }
-                if (dist[e.to] === dist[v] + 1) { sigma[e.to] += sigma[v]; pred[e.to].push({ v, li: e.li }); }
+                if (dist[e.to] === dist[v] + 1) { sigma[e.to] += sigma[v]; pred[e.to].push({ v, pid: e.pid }); }
             }
         }
         const delta = new Array<number>(n).fill(0);
@@ -188,11 +211,14 @@ export function edgeBetweenness(model: GraphModel, maxNodes = 2000): number[] | 
             for (const p of pred[w]) {
                 const c = (sigma[p.v] / sigma[w]) * (1 + delta[w]);
                 delta[p.v] += c;
-                ce[p.li] += c;
+                cp[p.pid] += c;
             }
         }
     }
-    const max = ce.reduce((a, b) => (b > a ? b : a), 0);
-    if (max > 0) for (let i = 0; i < m; i++) ce[i] /= max;
+    const max = cp.reduce((a, b) => (b > a ? b : a), 0);
+    if (max > 0) for (let i = 0; i < cp.length; i++) cp[i] /= max;
+    // Map each unique-pair score back onto its original link records (self-loops → 0).
+    const ce = new Array<number>(m).fill(0);
+    for (let li = 0; li < m; li++) if (linkPair[li] >= 0) ce[li] = cp[linkPair[li]];
     return ce;
 }

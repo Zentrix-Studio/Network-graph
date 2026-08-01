@@ -30,9 +30,20 @@ export interface SummaryTableOptions {
     onExport?: () => void;
     /** High contrast: flat fg/bg styling, no tints/shadows. */
     hc?: boolean;
+    /** Lazy, memoized provider for the opt-in analytical columns (NG-253):
+     *  "betweenness" | "closeness" | "pagerank" | "community" → number[]; "critical"
+     *  → boolean[]; null when not computable. Only called for a column the reader has
+     *  switched on, so nothing heavy runs unless it's needed. */
+    metricFor?: (key: string) => number[] | boolean[] | null;
+    /** Whether the analytical columns are computable now (premium + within the node
+     *  cap). Drives the Columns picker without forcing a compute (NG-253). */
+    analyticsAvailable?: boolean;
 }
 
 interface Column {
+    /** Stable id — sort tracks this (not a positional index), so toggling columns
+     *  in the picker can never point the sort at the wrong column (NG-253). */
+    key: string;
     label: string;
     numeric: boolean;
     value: (i: number) => string;
@@ -41,6 +52,10 @@ interface Column {
     bar?: { frac: (i: number) => number; color: (i: number) => string };
     /** Colour-dot prefix (category column). */
     dot?: (i: number) => string;
+    /** Offered in the Columns picker (NG-253). Non-optional columns are always shown. */
+    optional?: boolean;
+    /** Initial visibility. Existing columns stay on; the analytical columns are opt-in. */
+    defaultOn?: boolean;
 }
 
 /** Chrome palette derived from the surface (no new tokens needed). */
@@ -88,6 +103,7 @@ function icon(paths: string[], size = 14): SVGSVGElement {
 const SEARCH_ICON = ["M21 21l-4.8-4.8", "M17 10.5a6.5 6.5 0 1 1-13 0 6.5 6.5 0 0 1 13 0z"];
 const FILTER_ICON = ["M4 5h16l-6.5 8v5.5L10 21v-8L4 5z"];
 const EXPORT_ICON = ["M12 4v11", "M7 11l5 5 5-5", "M5 20h14"];
+const COLUMNS_ICON = ["M4 5h16v14H4z", "M11 5v14", "M15.5 5v14"];
 
 export function renderSummaryTable(
     host: HTMLElement,
@@ -115,27 +131,78 @@ export function renderSummaryTable(
     }
     const avgDeg = n ? (2 * e) / n : 0;
 
-    const columns: Column[] = [
-        { label: "Node", numeric: false, value: (i) => model.nodes[i].label, sortKey: (i) => model.nodes[i].label },
+    // Lazy, memoized (by the caller) analytical arrays — only fetched when a column is
+    // actually shown, so the O(V·E) passes never run for the default table (NG-253).
+    const numArr = (key: string): number[] | null => {
+        const r = opts.metricFor ? opts.metricFor(key) : null;
+        return Array.isArray(r) && typeof r[0] !== "boolean" ? (r as number[]) : (r && r.length === 0 ? [] : null);
+    };
+    const critArr = (): boolean[] | null => {
+        const r = opts.metricFor ? opts.metricFor("critical") : null;
+        return Array.isArray(r) ? (r as boolean[]) : null;
+    };
+    // Relative centrality values (normalised to the top node) → 3 decimals; "—" when
+    // the metric isn't available (above the perf cap / non-premium).
+    const fmt3 = (v: number | undefined): string => (v == null ? "—" : (Math.round(v * 1000) / 1000).toFixed(3));
+
+    const allColumns: Column[] = [
+        { key: "node", label: "Node", numeric: false, value: (i) => model.nodes[i].label, sortKey: (i) => model.nodes[i].label },
         {
-            label: "Degree", numeric: true, value: (i) => String(model.nodes[i].degree), sortKey: (i) => model.nodes[i].degree,
+            key: "degree", label: "Degree", numeric: true, value: (i) => String(model.nodes[i].degree), sortKey: (i) => model.nodes[i].degree,
             bar: { frac: (i) => model.nodes[i].degree / maxDeg, color: () => (hc ? surface.fg : accent) },
         },
-        { label: "In", numeric: true, value: (i) => String(model.nodes[i].inDegree), sortKey: (i) => model.nodes[i].inDegree },
-        { label: "Out", numeric: true, value: (i) => String(model.nodes[i].outDegree), sortKey: (i) => model.nodes[i].outDegree },
+        { key: "in", label: "In", numeric: true, value: (i) => String(model.nodes[i].inDegree), sortKey: (i) => model.nodes[i].inDegree },
+        { key: "out", label: "Out", numeric: true, value: (i) => String(model.nodes[i].outDegree), sortKey: (i) => model.nodes[i].outDegree },
         {
-            label: "Weighted", numeric: true, value: (i) => String(round(model.nodes[i].weightedDegree)), sortKey: (i) => model.nodes[i].weightedDegree,
+            key: "weighted", label: "Weighted", numeric: true, value: (i) => String(round(model.nodes[i].weightedDegree)), sortKey: (i) => model.nodes[i].weightedDegree,
             bar: { frac: (i) => model.nodes[i].weightedDegree / maxWeighted, color: (i) => (hc ? surface.fg : colorOf(i)) },
         },
-        { label: "Component", numeric: true, value: (i) => String(model.nodes[i].component), sortKey: (i) => model.nodes[i].component },
+        { key: "component", label: "Component", numeric: true, value: (i) => String(model.nodes[i].component), sortKey: (i) => model.nodes[i].component },
     ];
     if (hasCategory) {
-        columns.push({
-            label: "Category", numeric: false,
+        allColumns.push({
+            key: "category", label: "Category", numeric: false,
             value: (i) => attrs[i]?.category ?? "", sortKey: (i) => attrs[i]?.category ?? "",
             dot: (i) => (hc ? surface.fg : colorOf(i)),
         });
     }
+    // Opt-in analytical columns (NG-253) — hidden by default, added via the Columns
+    // picker. Betweenness (the broker metric) gets a bar; the rest are plain values.
+    allColumns.push(
+        {
+            key: "betweenness", label: "Betweenness", numeric: true, optional: true, defaultOn: false,
+            value: (i) => fmt3(numArr("betweenness")?.[i]),
+            sortKey: (i) => numArr("betweenness")?.[i] ?? -1,
+            bar: { frac: (i) => numArr("betweenness")?.[i] ?? 0, color: () => (hc ? surface.fg : accent) },
+        },
+        {
+            key: "closeness", label: "Closeness", numeric: true, optional: true, defaultOn: false,
+            value: (i) => fmt3(numArr("closeness")?.[i]), sortKey: (i) => numArr("closeness")?.[i] ?? -1,
+        },
+        {
+            key: "pagerank", label: "PageRank", numeric: true, optional: true, defaultOn: false,
+            value: (i) => fmt3(numArr("pagerank")?.[i]), sortKey: (i) => numArr("pagerank")?.[i] ?? -1,
+        },
+        {
+            key: "community", label: "Community", numeric: true, optional: true, defaultOn: false,
+            value: (i) => { const a = numArr("community"); return a ? String(a[i]) : "—"; },
+            sortKey: (i) => numArr("community")?.[i] ?? -1,
+        },
+        {
+            key: "critical", label: "Critical", numeric: true, optional: true, defaultOn: false,
+            value: (i) => { const a = critArr(); return a ? (a[i] ? "Yes" : "No") : "—"; },
+            sortKey: (i) => { const a = critArr(); return a ? (a[i] ? 1 : 0) : -1; },
+        },
+    );
+
+    // Visible-column state (session-local). Sort tracks a column KEY, so toggling
+    // columns never mis-points the sort.
+    const visible = new Set<string>(allColumns.filter((col) => col.defaultOn !== false).map((col) => col.key));
+    const visibleCols = (): Column[] => allColumns.filter((col) => visible.has(col.key));
+    // Sort state: default Degree desc. Tracks a column KEY (not an index), so toggling
+    // columns in the picker can never mis-point the sort (NG-253).
+    let sortColKey = "degree";
+    let sortDesc = true;
 
     /** Free-text used to match a row (node key + category), lower-cased once. */
     const searchText = (i: number): string =>
@@ -269,6 +336,56 @@ export function renderSummaryTable(
         strip.appendChild(holder);
     }
 
+    // Columns picker (NG-253) — toggle the optional/analytical columns, session-local.
+    // Mirrors the Filter popover. Offered whenever any column is optional.
+    const optionalCols = allColumns.filter((col) => col.optional);
+    if (optionalCols.length) {
+        const holder = document.createElement("span");
+        holder.style.cssText = "position:relative;display:inline-flex";
+        const colsBtn = chromeBtn("Columns", icon(COLUMNS_ICON), "zx-sum-columns");
+        const pop = document.createElement("div");
+        pop.className = "zx-sum-colspop";
+        pop.style.cssText = `display:none;position:absolute;top:38px;right:0;z-index:20;min-width:190px;` +
+            `background:${c.cardBg};border:1px solid ${c.border};border-radius:10px;box-shadow:${c.shadow};` +
+            `padding:8px;max-height:280px;overflow:auto`;
+        const analyticsKeys = new Set(["betweenness", "closeness", "pagerank", "community", "critical"]);
+        for (const col of optionalCols) {
+            const disabled = analyticsKeys.has(col.key) && !opts.analyticsAvailable;
+            const row = document.createElement("label");
+            row.style.cssText = `display:flex;align-items:center;gap:8px;padding:5px 7px;border-radius:7px;` +
+                `font:12px ${fontFamily};color:${disabled ? surface.muted : surface.fg};cursor:${disabled ? "default" : "pointer"};white-space:nowrap`;
+            const cb = document.createElement("input");
+            cb.type = "checkbox";
+            cb.checked = visible.has(col.key);
+            cb.disabled = disabled;
+            cb.onchange = () => {
+                if (cb.checked) visible.add(col.key); else visible.delete(col.key);
+                // If the sorted column was just hidden, fall back to Degree.
+                if (!visible.has(sortColKey)) { sortColKey = "degree"; sortDesc = true; }
+                colsBtn.style.borderColor = analyticsShown() ? accent : c.border;
+                colsBtn.style.color = analyticsShown() ? accent : surface.fg;
+                renderHead();
+                renderBody();
+            };
+            const t = document.createElement("span");
+            t.textContent = col.label + (disabled ? " (≤2000 nodes)" : "");
+            row.appendChild(cb); row.appendChild(t);
+            row.onclick = (ev) => ev.stopPropagation();
+            pop.appendChild(row);
+        }
+        colsBtn.onclick = (ev) => {
+            ev.stopPropagation();
+            pop.style.display = pop.style.display === "none" ? "block" : "none";
+        };
+        holder.appendChild(colsBtn);
+        holder.appendChild(pop);
+        strip.appendChild(holder);
+    }
+    /** Any optional column currently shown → the Columns button reads active. */
+    function analyticsShown(): boolean {
+        return optionalCols.some((col) => visible.has(col.key));
+    }
+
     if (opts.onExport) {
         const exportBtn = chromeBtn("Export", icon(EXPORT_ICON), "zx-sum-export");
         exportBtn.onclick = (ev) => { ev.stopPropagation(); opts.onExport!(); };
@@ -285,10 +402,6 @@ export function renderSummaryTable(
     table.setAttribute("role", "table");
     table.setAttribute("aria-label", "Node metrics");
 
-    // Sort state: default by degree desc (column index 1).
-    let sortCol = 1;
-    let sortDesc = true;
-
     const thead = document.createElement("thead");
     const hr = document.createElement("tr");
 
@@ -300,22 +413,28 @@ export function renderSummaryTable(
     const rankTh = document.createElement("th");
     rankTh.textContent = "#";
     rankTh.style.cssText = `${thBase};text-align:left;width:1%`;
-    hr.appendChild(rankTh);
 
-    const headerCells: HTMLTableCellElement[] = [];
-    columns.forEach((col, ci) => {
-        const th = document.createElement("th");
-        th.style.cssText = `${thBase};text-align:${col.numeric ? "right" : "left"};cursor:pointer`;
-        th.title = "Click to sort";
-        th.onclick = () => {
-            if (sortCol === ci) sortDesc = !sortDesc;
-            else { sortCol = ci; sortDesc = col.numeric; }
-            renderBody();
-            updateHeaderArrows();
-        };
-        hr.appendChild(th);
-        headerCells.push(th);
-    });
+    // Header cells are rebuilt whenever the visible-column set changes (NG-253).
+    let headerCells: { col: Column; th: HTMLTableCellElement }[] = [];
+    function renderHead(): void {
+        while (hr.firstChild) hr.removeChild(hr.firstChild);
+        hr.appendChild(rankTh);
+        headerCells = [];
+        for (const col of visibleCols()) {
+            const th = document.createElement("th");
+            th.style.cssText = `${thBase};text-align:${col.numeric ? "right" : "left"};cursor:pointer`;
+            th.title = "Click to sort";
+            th.onclick = () => {
+                if (sortColKey === col.key) sortDesc = !sortDesc;
+                else { sortColKey = col.key; sortDesc = col.numeric; }
+                renderBody();
+                updateHeaderArrows();
+            };
+            hr.appendChild(th);
+            headerCells.push({ col, th });
+        }
+        updateHeaderArrows();
+    }
     thead.appendChild(hr);
     table.appendChild(thead);
 
@@ -326,11 +445,11 @@ export function renderSummaryTable(
     host.appendChild(wrap);
 
     function updateHeaderArrows(): void {
-        columns.forEach((col, ci) => {
-            const arrow = ci === sortCol ? (sortDesc ? " ▼" : " ▲") : "";
-            headerCells[ci].textContent = col.label + arrow;
-            headerCells[ci].style.color = ci === sortCol ? (hc ? surface.fg : accent) : surface.muted;
-        });
+        for (const { col, th } of headerCells) {
+            const active = col.key === sortColKey;
+            th.textContent = col.label + (active ? (sortDesc ? " ▼" : " ▲") : "");
+            th.style.color = active ? (hc ? surface.fg : accent) : surface.muted;
+        }
     }
 
     /** A proportional bar + value, right-aligned (DEGREE / WEIGHTED columns). */
@@ -354,7 +473,8 @@ export function renderSummaryTable(
     }
 
     function renderBody(): void {
-        const col = columns[sortCol];
+        const cols = visibleCols();
+        const col = cols.find((cc) => cc.key === sortColKey) ?? cols[0];
         const order = model.nodes
             .map((node) => node.index)
             .filter((i) => query === "" || searchText(i).indexOf(query) !== -1)
@@ -374,7 +494,7 @@ export function renderSummaryTable(
         if (order.length === 0) {
             const tr = document.createElement("tr");
             const td = document.createElement("td");
-            td.colSpan = columns.length + 1;
+            td.colSpan = cols.length + 1;
             td.textContent = "No nodes match your search.";
             td.style.cssText = `padding:18px 14px;text-align:center;font:12px ${fontFamily};` +
                 `color:${surface.muted}`;
@@ -394,7 +514,7 @@ export function renderSummaryTable(
             rankTd.style.cssText = `${tdBase};text-align:left;font:12px ${MONO};color:${surface.muted}`;
             tr.appendChild(rankTd);
 
-            columns.forEach((cdef) => {
+            cols.forEach((cdef) => {
                 const td = document.createElement("td");
                 td.style.cssText = `${tdBase};text-align:${cdef.numeric ? "right" : "left"}`;
                 const v = cdef.value(i);
@@ -424,7 +544,7 @@ export function renderSummaryTable(
         });
     }
 
-    updateHeaderArrows();
+    renderHead();
     renderBody();
     return wrap;
 }

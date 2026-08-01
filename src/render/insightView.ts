@@ -12,10 +12,19 @@
  * createElement + textContent — never innerHTML (certifiable by construction).
  */
 
-import { GraphNarrative, InsightTone } from "../insights/graphInsights";
+import { GraphNarrative, InsightTone, InsightAction } from "../insights/graphInsights";
 import { Surface, fontFamily, accent, posSafe, negSafe } from "../theme/zentrixTokens";
 
 const SERIF = "Georgia, 'Times New Roman', serif";
+
+/** Short call-to-action shown under a clickable metric (NG-252). */
+function actionHint(a: InsightAction): string {
+    switch (a.kind) {
+        case "focusNode": return "Focus on the graph";
+        case "colorBy": return a.mode === "cluster" ? "Colour by community" : "Colour by group";
+        case "highlightBridges": return "Highlight on the graph";
+    }
+}
 
 /** Chrome palette derived from the surface — same recipe as the summary table. */
 function chrome(surface: Surface, hc: boolean) {
@@ -43,8 +52,10 @@ export function renderInsightView(
     narrative: GraphNarrative,
     surface: Surface,
     hc = false,
+    onAction?: (a: InsightAction) => void,
 ): HTMLDivElement {
     const c = chrome(surface, hc);
+    const hoverBg = hc ? "transparent" : (surface.bg === "#FFFFFF" ? "#F4F5FB" : "#1C1D28");
 
     const wrap = document.createElement("div");
     wrap.className = "zx-insight";
@@ -109,6 +120,30 @@ export function renderInsightView(
                 sub.textContent = m.sub;
                 sub.style.cssText = `font:400 11px ${fontFamily};color:${surface.muted};margin-top:3px`;
                 metricWrap.appendChild(sub);
+            }
+            // Clickable metric (NG-252): turn the headline block into an accessible
+            // button that drives the graph. Transient — never rewrites saved settings.
+            // createElement + addEventListener only (no innerHTML) keeps it certifiable.
+            if (m.action && onAction) {
+                const action = m.action;
+                const hint = actionHint(action);
+                metricWrap.style.cssText += ";cursor:pointer;border-radius:10px;padding:8px 10px;margin:-8px -10px 4px -10px;transition:background 120ms ease";
+                metricWrap.setAttribute("role", "button");
+                metricWrap.setAttribute("tabindex", "0");
+                metricWrap.setAttribute("aria-label", `${m.value} ${m.label}. ${hint}.`);
+                const cue = document.createElement("div");
+                cue.textContent = `${hint} ›`;
+                cue.style.cssText = `font:600 11px ${fontFamily};color:${accent};margin-top:7px`;
+                metricWrap.appendChild(cue);
+                const fire = () => onAction(action);
+                metricWrap.addEventListener("click", fire);
+                metricWrap.addEventListener("keydown", (e: KeyboardEvent) => {
+                    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fire(); }
+                });
+                metricWrap.addEventListener("mouseenter", () => { metricWrap.style.background = hoverBg; });
+                metricWrap.addEventListener("mouseleave", () => { metricWrap.style.background = "transparent"; });
+                metricWrap.addEventListener("focus", () => { metricWrap.style.outline = `2px solid ${accent}`; metricWrap.style.outlineOffset = "1px"; });
+                metricWrap.addEventListener("blur", () => { metricWrap.style.outline = "none"; });
             }
             card.appendChild(metricWrap);
         }

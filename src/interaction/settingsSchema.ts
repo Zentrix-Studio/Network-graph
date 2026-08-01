@@ -482,10 +482,7 @@ export const SB_CATS: SBCategory[] = [
                 options: [opt("circle", "Circle"), opt("square", "Square"), opt("diamond", "Diamond"), opt("triangle", "Triangle"), opt("hexagon", "Hexagon"), opt("donut", "Donut")],
                 tileIcons: { circle: "shapeCircle", square: "shapeSquare", diamond: "shapeDiamond", triangle: "shapeTriangle", hexagon: "shapeHexagon", donut: "shapeDonut" },
                 info: "Applies to ordinary node markers. A semantic icon or bound node image replaces the shape for that node." },
-            { control: "color", label: "Colour", key: "nodes.color",
-                infoFn: (g) => String(g("colors.mode")) === "single"
-                    ? "Sets the single node marker colour. Semantic entity icons inherit this colour."
-                    : "This is the fallback node colour. To apply it to every node, open Colours → Mode and set Colour by to Single. Palette, gradient, and conditional-rule colours override it; semantic entity icons inherit the resolved node colour." },
+            // Node colour lives in Colours → Mode (the primary colour surface), not here.
             { control: "switch", label: "Animate adjustments", key: "nodes.animate",
                 info: "Animates visual transitions such as zoom and layout adjustments. It changes how updates move, not the final node positions. Reduced-motion preferences and Canvas rendering can suppress some animation." },
             { control: "switch", label: "Initial growth animation", key: "nodes.initialAnimation",
@@ -609,6 +606,14 @@ export const SB_CATS: SBCategory[] = [
             { control: "switch", label: "CVD-safe only", key: "colors.cvdOnly",
                 visibleIf: (g) => String(g("colors.mode")) !== "single",
                 info: "Filters the Palette list to schemes marked safe for common colour-vision deficiencies. It does not recolour the graph until you select one of the remaining palettes." },
+            // The base node colour. In Single mode this IS the graph colour (palette is hidden);
+            // in every other mode it is the fallback where no palette/gradient/rule applies.
+            { control: "color", label: "Node colour", key: "nodes.color",
+                dimIf: isCustomOn,
+                disabledReason: "Turn off Custom node gradient (Gradient tab) to use a fixed node colour.",
+                infoFn: (g) => String(g("colors.mode")) === "single"
+                    ? "Sets the single node marker colour. Semantic entity icons inherit this colour."
+                    : "The fallback node colour, used where no palette, gradient, or conditional rule applies. Palette, gradient, and conditional-rule colours override it; semantic entity icons inherit the resolved node colour." },
             { control: "slider", label: "Node opacity", key: "colors.opacity", min: 10, max: 100, step: 5, suffix: "%" },
             // Legend show + position live in the Overlays category (with the other chrome).
         ] },
@@ -637,15 +642,13 @@ export const SB_CATS: SBCategory[] = [
             { control: "color", label: "Mid 4", key: "colors.gMid4", visibleIf: (g) => isCustomOn(g) && midCount(g) >= 4 },
             { control: "color", label: "Mid 5", key: "colors.gMid5", visibleIf: (g) => isCustomOn(g) && midCount(g) >= 5 },
             { control: "color", label: "End", key: "colors.gHigh", visibleIf: isCustomOn },
-            { control: "color", label: "Single colour", key: "nodes.color", visibleIf: (g) => String(g("colors.mode")) === "single",
-                dimIf: isCustomOn,
-                disabledReason: "Turn off Custom node gradient to use Single colour.",
-                info: "Applies to node shapes and semantic entity icons when Custom node gradient is off. The icons are monochrome vectors and inherit this colour." },
-            // Empty-state hint when the gradient is off and we're not in single mode — the
-            // colour controls above are all gated, so the tab would otherwise show only the
-            // toggle. Explain what turning it on does (never a blank pane — NG-144).
-            { control: "note", visibleIf: (g) => !isCustomOn(g) && String(g("colors.mode")) !== "single",
-                labelFn: () => "Turn on “Custom node gradient” to colour nodes along a Start → End ramp of your choice. Otherwise nodes use the palette selected in the Mode tab." },
+            // Node colour itself lives in Colours → Mode. Empty-state hint when the gradient
+            // is off — the colour controls above are all gated, so the tab would otherwise
+            // show only the toggle. Explain what turning it on does (never a blank pane — NG-144).
+            { control: "note", visibleIf: (g) => !isCustomOn(g),
+                labelFn: (g) => String(g("colors.mode")) === "single"
+                    ? "Turn on “Custom node gradient” to colour nodes along a Start → End ramp of your choice. Otherwise nodes use the single Node colour set in the Mode tab."
+                    : "Turn on “Custom node gradient” to colour nodes along a Start → End ramp of your choice. Otherwise nodes use the palette selected in the Mode tab." },
         ] },
     ] },
     { id: "edges", name: "Edges", flat: true, subs: [{ id: "edges", kind: "fields", fields: [

@@ -33,11 +33,11 @@ import { shortestPath, weightedShortestPath, kHopSet } from "./model/traversal";
 import { buildHierarchy, hiddenByCollapse, isParentNode, subtreeSet, computeDepth, Hierarchy } from "./model/hierarchy";
 import { rankedNodeSet, RankMode, RankBy } from "./model/ranking";
 import { inducedSubgraphLayout } from "./model/subgraphLayout";
-import { computeCentrality, CentralityMetric } from "./model/centrality";
+import { computeCentrality, CentralityMetric, betweennessCentrality, closenessCentrality, pageRank } from "./model/centrality";
 import { deriveTreeParents } from "./model/treeLayout";
 import { conditionalColor, resolveNodeField, parseRules, serializeRules, CFRule } from "./model/conditionalFormat";
 import { RulesPanel } from "./interaction/rulesPanel";
-import { computeNarrative } from "./insights/graphInsights";
+import { computeNarrative, InsightAction, articulationFlags } from "./insights/graphInsights";
 import {
     renderGraph, fitTransform, drawLabels, makeEdgeWidth, GraphGeometry, GraphRenderOptions,
     LabelPosition, LabelWrap, LabelBgType, NodeShape, edgeCurvePath, pairPerp, trimEdgeEnds,
@@ -279,6 +279,23 @@ export class Visual implements IVisual {
     private exploreTrail: string[] = [];
     private pathSource: string | null = null;
     private pathTarget: string | null = null;
+
+    // Clickable-insight previews (NG-252): transient/session-local, never persisted or
+    // cross-filtered. Only one is live at a time. `insightColorMode` overrides the
+    // authored colour scheme for a preview; `insightBridgeLinks` accents the structural-
+    // bridge edge set (link indices); `insightFocusActive` lets an insight-driven ego
+    // focus (reusing exploreFocus) show even when the explore setting is off. Cleared by
+    // an empty-canvas click, Escape, or applying another insight action.
+    private insightColorMode: "cluster" | "component" | null = null;
+    private insightBridgeLinks: Set<number> | null = null;
+    private insightFocusActive = false;
+
+    /** Lazy, memoized analytical columns for the Table view (NG-253). Computed once per
+     *  render snapshot the first time a reader switches a column on, so the heavy
+     *  betweenness/closeness passes never run for the default table. Cache is keyed on
+     *  the lastRender identity, so a new render rebuilds it. */
+    private tableMetricCache = new Map<string, number[] | boolean[]>();
+    private tableMetricToken: RenderState | null = null;
 
     // Hierarchy fold/drill session state (Node-parent). Keys, so they survive re-index.
     private collapsed = new Set<string>();          // collapsed parent keys (expand/collapse)
@@ -575,7 +592,9 @@ export class Visual implements IVisual {
             // selection (NG-074) — otherwise the working copy is lost on the next refresh.
             if (this.noteEditor.isOpen()) { this.noteEditor.commit(); return; }
             this.closeDetail();
-            this.clearExploreFocus();
+            // Empty-canvas click also dismisses any transient Insight preview (NG-252).
+            const clearedPreview = this.clearInsightPreview();
+            if (!this.clearExploreFocus() && clearedPreview) this.rerenderFromSettings();
         });
 
         // Escape exits drill-down, then ego-focus, from the canvas (G2-007). A focused
@@ -584,7 +603,10 @@ export class Visual implements IVisual {
             if (event.key !== "Escape") return;
             if (this.chromeHidden) { event.preventDefault(); this.setChromeHidden(false); return; }
             if (this.drillRoot) { event.preventDefault(); this.drillOut(); return; }
+            // Escape also dismisses any transient Insight preview (NG-252).
+            const clearedPreview = this.clearInsightPreview();
             if (this.clearExploreFocus()) event.preventDefault();
+            else if (clearedPreview) { event.preventDefault(); this.rerenderFromSettings(); }
         });
 
         // Right-click on empty canvas → the report-level context menu (Power BI
@@ -1078,7 +1100,8 @@ export class Visual implements IVisual {
             this.actionBar.hide(); // zoom/undo act on the graph canvas only
             this.overlayGroup.selectAll("*").remove(); // drop any lingering legend/chrome
             if (this.viewMode === "insight") {
-                this.summaryEl = renderInsightView(this.element, computeNarrative(st.model), surface, st.hc);
+                this.summaryEl = renderInsightView(this.element, computeNarrative(st.model), surface, st.hc,
+                    (a) => this.applyInsightAction(a));
             } else {
                 this.summaryEl = renderSummaryTable(this.element, st.model, st.data.attrs, st.data.hasCategory, surface, {
                     // Category colours drive the WEIGHTED bars + CATEGORY dots — the same
@@ -1087,6 +1110,10 @@ export class Visual implements IVisual {
                     categories: st.data.categories,
                     onExport: this.downloadService() ? (): void => { void this.exportData("csv"); } : undefined,
                     hc: st.hc,
+                    // Opt-in analytical columns (NG-253) — lazy + memoized, so nothing
+                    // heavy runs unless the reader switches a column on.
+                    analyticsAvailable: this.tableAnalyticsAvailable(st),
+                    metricFor: (key) => this.tableMetricFor(st, key),
                 });
             }
             return;
@@ -2519,7 +2546,7 @@ export class Visual implements IVisual {
         const kept = this.rankingAction() === "filter" ? this.rankedKeptSet(st) : null;
         const s = this.formattingSettings;
         let ego: Set<number> | null = null;
-        if (this.premium.active && s.explore.show.value && this.exploreFocus) {
+        if (this.premium.active && (s.explore.show.value || this.insightFocusActive) && this.exploreFocus) {
             const fi = st.model.indexByKey.get(this.exploreFocus);
             if (fi !== undefined) ego = kHopSet(st.model, fi, this.exploreHops, st.neighbors);
         }
@@ -2571,14 +2598,26 @@ export class Visual implements IVisual {
         const searchMatches = this.searchMatchesOf(st);
         if (searchMatches) applySearchHighlight(this.nodeGroup, this.edgeGroup, st.model, accent, searchMatches);
 
-        // Explore: mask to the k-hop ego network of the focused node.
-        if (s.explore.show.value && this.exploreFocus) {
+        // Explore: mask to the k-hop ego network of the focused node. The insight-driven
+        // focus (NG-252) reuses this mask but leaves the enterprise explore panel alone.
+        if ((s.explore.show.value || this.insightFocusActive) && this.exploreFocus) {
             const fi = st.model.indexByKey.get(this.exploreFocus);
             if (fi !== undefined) {
                 const visible = kHopSet(st.model, fi, this.exploreHops, st.neighbors);
                 applyExploreMask(this.nodeGroup, this.edgeGroup, this.labelGroup, st.model, visible, [this.valueGroup]);
-                this.enterprisePanel.setExploreState(this.exploreFocus, this.exploreHops, this.exploreTrail);
+                if (s.explore.show.value) this.enterprisePanel.setExploreState(this.exploreFocus, this.exploreHops, this.exploreTrail);
             }
+        }
+
+        // Insight bridge highlight (NG-252): accent exactly the structural-bridge links,
+        // dim the rest — reusing the path-emphasis primitive over an edge-set predicate.
+        if (this.insightBridgeLinks && this.insightBridgeLinks.size) {
+            const links = this.insightBridgeLinks;
+            const bridgeNodes = new Set<number>();
+            st.model.links.forEach((l, li) => {
+                if (links.has(li)) { bridgeNodes.add(l.source); bridgeNodes.add(l.target); }
+            });
+            applyPathEmphasis(this.nodeGroup, this.edgeGroup, accent, bridgeNodes, (li) => links.has(li));
         }
 
         // Path: highlight the shortest path between the two picked nodes.
@@ -2628,6 +2667,106 @@ export class Visual implements IVisual {
         this.setExploreFocus(null);
         this.rerenderFromSettings();
         return true;
+    }
+
+    /** Dispatch a click on an Insight card (NG-252): return to the graph and apply a
+     *  transient, non-persisted preview — focus an entity's ego network, preview a
+     *  colouring, or highlight the structural-bridge edge set. Only one preview is live
+     *  at once. Reuses existing mechanisms (ego mask, colour accessor, path emphasis) so
+     *  the repaint goes through the cached-inputs path with no host round-trip. */
+    private applyInsightAction(a: InsightAction): void {
+        // Reset every transient preview first — one at a time.
+        this.insightColorMode = null;
+        this.insightBridgeLinks = null;
+        this.insightFocusActive = false;
+        this.setExploreFocus(null);
+        switch (a.kind) {
+            case "focusNode":
+                this.setExploreFocus(a.nodeKey);
+                this.exploreHops = Math.max(1, this.exploreHops);
+                this.insightFocusActive = true;
+                break;
+            case "colorBy":
+                // Cluster preview needs community data; compute it on demand if the
+                // authored colour mode never did (component is always available).
+                if (a.mode === "cluster" && this.lastRender && !this.lastRender.community) {
+                    this.lastRender.community = this.computeInsightCommunity(this.lastRender);
+                }
+                this.insightColorMode = a.mode;
+                break;
+            case "highlightBridges": {
+                // Map bridge pairs (by natural key) back to every matching link record,
+                // so both directions of a reciprocal bridge are accented.
+                const model = this.lastRender?.model;
+                const links = new Set<number>();
+                if (model) {
+                    const wanted = new Set(a.pairs.map(([u, v]) => (u < v ? `${u} ${v}` : `${v} ${u}`)));
+                    model.links.forEach((l, li) => {
+                        if (l.source === l.target) return;
+                        const uk = model.nodes[l.source].key, vk = model.nodes[l.target].key;
+                        const key = uk < vk ? `${uk} ${vk}` : `${vk} ${uk}`;
+                        if (wanted.has(key)) links.add(li);
+                    });
+                }
+                this.insightBridgeLinks = links;
+                break;
+            }
+        }
+        if (this.viewMode !== "graph") {
+            this.viewMode = "graph";
+            this.viewToggle.set("graph");
+        }
+        this.rerenderFromSettings();
+    }
+
+    /** Whether the Table's analytical columns are computable now (NG-253): premium
+     *  (fail-open) and within the O(V·E) node cap shared with edge-betweenness/tooltips. */
+    private tableAnalyticsAvailable(st: RenderState): boolean {
+        return this.premium.active && st.model.nodes.length <= 2000;
+    }
+
+    /** Lazy, memoized provider for the Table's opt-in analytical columns (NG-253).
+     *  Betweenness/closeness/PageRank/community → number[]; critical → boolean[]; null
+     *  when unavailable. Computed at most once per render snapshot per metric. */
+    private tableMetricFor(st: RenderState, key: string): number[] | boolean[] | null {
+        if (!this.tableAnalyticsAvailable(st)) return null;
+        if (this.tableMetricToken !== st) { this.tableMetricCache.clear(); this.tableMetricToken = st; }
+        const hit = this.tableMetricCache.get(key);
+        if (hit) return hit;
+        let v: number[] | boolean[] | null = null;
+        switch (key) {
+            case "betweenness": v = betweennessCentrality(st.model); break;
+            case "closeness": v = closenessCentrality(st.model); break;
+            case "pagerank": v = pageRank(st.model); break;
+            case "community": v = st.community ?? this.computeInsightCommunity(st); break;
+            case "critical": v = articulationFlags(st.model); break;
+            default: return null;
+        }
+        this.tableMetricCache.set(key, v);
+        return v;
+    }
+
+    /** Louvain communities for a transient cluster preview, using the same settings and
+     *  category accessor the main render uses — so the preview matches turning the
+     *  authored "Colour by → Community" mode on. Deterministic. */
+    private computeInsightCommunity(st: RenderState): number[] {
+        const cl = this.formattingSettings.clusters;
+        return resolveClusters(st.model, (i) => (st.data.attrs[i]?.category ?? null), {
+            mode: (cl.clusterBy.value.value as ClusterMode) || "auto",
+            resolution: Math.max(0.2, (cl.resolution.value || 100) / 100),
+            minClusterSize: Math.max(1, cl.minClusterSize.value || 1),
+            maxClusters: Math.max(0, cl.maxClusters.value || 0),
+        });
+    }
+
+    /** Clear any transient Insight-view preview (NG-252). Returns true if one was live,
+     *  so the caller can repaint. Also releases an insight-driven ego focus. */
+    private clearInsightPreview(): boolean {
+        const had = this.insightColorMode !== null || this.insightBridgeLinks !== null || this.insightFocusActive;
+        this.insightColorMode = null;
+        this.insightBridgeLinks = null;
+        if (this.insightFocusActive) { this.insightFocusActive = false; this.setExploreFocus(null); }
+        return had;
     }
 
     /** Small-tile breakpoint (CEO): below this the floating overlays (action/zoom bar,
@@ -2783,6 +2922,11 @@ export class Visual implements IVisual {
      *  original preference stays persisted and resumes if its prerequisite returns,
      *  while rendering and the gear use an honest available fallback. */
     private effectiveColorMode(st: RenderState): ColorMode {
+        // Transient Insight-view preview (NG-252) overrides the authored mode without
+        // persisting it. "component" always works (component is on every node); "cluster"
+        // needs community data — fall through to the stored mode if it isn't available.
+        if (this.insightColorMode === "component") return "component";
+        if (this.insightColorMode === "cluster" && st.community) return "cluster";
         const stored = (this.formattingSettings.colors.mode.value.value as ColorMode) ?? "single";
         return stored === "category" && !st.data.hasCategory ? "single" : stored;
     }
