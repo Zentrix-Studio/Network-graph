@@ -2,25 +2,36 @@
 
 /**
  * Value-on-node labels — a formatted number for every node that has a value. Big nodes
- * carry it *inside* the glyph (the "labeled bubble" pattern, contrast text over the fill);
- * nodes too small to hold legible text carry it *below* the glyph instead, so no value is
- * ever silently dropped just because a node is small. Drawn into a dedicated layer above
- * the nodes. Arithmetic width estimate (no getBBox). Tagged with data-ni/dx/dy so a live
- * drag carries the value with its node.
+ * carry it *inside* the glyph (the "labeled bubble" pattern, contrast text over the fill).
+ * A node too small to hold legible text is simply skipped when outer labels are on — the
+ * outer label already identifies it, so a value pushed *below* the glyph only adds clutter
+ * (NG-240). When outer labels are off, the value still falls *below* the glyph so it is not
+ * silently dropped. Drawn into a dedicated layer above the nodes. Arithmetic width estimate
+ * (no getBBox). Tagged with data-ni/dx/dy so a live drag carries the value with its node.
  */
 
 import { Selection } from "d3";
 import { GraphModel, Vec2 } from "../model/graphTypes";
+import { NodeShape } from "./graph";
 
 type G = Selection<SVGGElement, unknown, null, undefined>;
 
 export interface NodeValueOptions {
     valueOf: (i: number) => number | null;
     radiusOf: (i: number) => number;
+    /** Node marker shape — the label centres on the shape's visual body, not just its
+     *  bounding-box centre. Matters for the upward triangle, whose mass sits low
+     *  (86d3vdpba). Defaults to "circle" (bbox centre == visual centre) when omitted. */
+    shape?: NodeShape;
     /** Contrast colour for the text over node i's fill (used when it sits inside). */
     textColorOf: (i: number) => string;
     /** Foreground colour for text placed outside/below a small node, over the canvas. */
     outsideColor: string;
+    /** Whether outer node labels are being drawn (NG-240). When true, a value that cannot
+     *  fit inside a small node is hidden rather than pushed below it — the outer label
+     *  already names the node, so the pushed-out number is redundant clutter. When false,
+     *  the value still falls below the node so the only value display is never dropped. */
+    outerLabelsShown: boolean;
     decimals: number;
     displayUnits: ValueDisplayUnits;
     font: string;
@@ -40,17 +51,28 @@ export function drawNodeValues(group: G, model: GraphModel, px: Vec2[], opts: No
         const text = formatValue(v, opts.decimals, opts.displayUnits);
         const preferredFont = Math.max(6, Math.min(40, opts.fontSize));
         const insideFont = Math.min(r * 0.95, preferredFont);
-        const fitsInside = r >= 7 && text.length * insideFont * 0.6 <= r * 2.1;
+        // The upward triangle carries its mass low — the base is at +0.72r, the apex at
+        // -r — so its usable interior sits BELOW the bounding-box centre. Centre the label
+        // there (≈0.28r down, near the centroid) and budget against the narrower width at
+        // that height, or it straddles the apex and spills above the shape (86d3vdpba).
+        const isTri = opts.shape === "triangle";
+        const insideBudget = isTri ? r * 1.35 : r * 2.1;
+        const triYShift = isTri ? r * 0.28 : 0;
+        const fitsInside = r >= 7 && text.length * insideFont * 0.6 <= insideBudget;
 
         let cx: number, cy: number, dy: number, fontSize: number, fill: string, weight: number;
         if (fitsInside) {
             fontSize = insideFont;
-            dy = fontSize * 0.34;
+            dy = triYShift + fontSize * 0.34;
             cx = px[i].x; cy = px[i].y + dy;
             fill = opts.textColorOf(i); weight = opts.bold ? 700 : 400;
+        } else if (opts.outerLabelsShown) {
+            // No room inside and the outer label already identifies the node — hide the
+            // value rather than pushing a redundant number below the glyph (NG-240).
+            continue;
         } else {
-            // Too small to hold the value inside — place it just below the node so even
-            // the smallest nodes still show their value.
+            // Outer labels are off, so this is the node's only value display — place it
+            // just below the node instead of dropping it.
             fontSize = preferredFont;
             dy = r + fontSize;
             cx = px[i].x; cy = px[i].y + dy;

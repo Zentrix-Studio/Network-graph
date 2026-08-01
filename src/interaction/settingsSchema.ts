@@ -129,6 +129,26 @@ const KEYS: Record<string, Entry> = {
     "nodes.valueDec": num("nodes", "valueDecimals", (m) => m.nodes.valueDecimals),
     "nodes.mergeDup": bool("nodes", "mergeDuplicates", (m) => m.nodes.mergeDuplicates),
     "nodes.clickInfo": bool("nodes", "showFullInfoOnClick", (m) => m.nodes.showFullInfoOnClick),
+    // Single node-click action (NG-248). A node click can only do ONE thing, so this virtual
+    // key presents the three underlying booleans (Show full info, Expand/collapse, Drill-down)
+    // as one mutually-exclusive selector — picking one clears the others. "filter" = none of
+    // them (plain cross-filter). Derived get() keeps it truthful if the booleans are set apart.
+    "nodes.clickMode": {
+        get: (m) => m.nodes.showFullInfoOnClick.value ? "info"
+            : m.hierarchy.foldable.value ? "expand"
+                : m.hierarchy.drilldown.value ? "drilldown"
+                    : "filter",
+        set: (p, v) => {
+            p("nodes", "showFullInfoOnClick", v === "info");
+            p("hierarchy", "foldable", v === "expand");
+            p("hierarchy", "drilldown", v === "drilldown");
+        },
+        setLocal: (m, v) => {
+            m.nodes.showFullInfoOnClick.value = v === "info";
+            m.hierarchy.foldable.value = v === "expand";
+            m.hierarchy.drilldown.value = v === "drilldown";
+        },
+    },
 
     "colors.mode": dropdown("colors", "mode", (m) => m.colors.mode),
     "colors.palette": dropdown("colors", "palette", (m) => m.colors.palette),
@@ -162,6 +182,7 @@ const KEYS: Record<string, Entry> = {
     "edges.showLabels": bool("edges", "showLabels", (m) => m.edges.showLabels),
     "edges.labelSource": dropdown("edges", "labelSource", (m) => m.edges.labelSource),
     "edges.thick": num("edges", "thickness", (m) => m.edges.thickness),
+    "edges.scaleByWeight": bool("edges", "scaleByWeight", (m) => m.edges.scaleByWeight),
     "edges.curve": num("edges", "curve", (m) => m.edges.curve),
     "edges.flow": bool("edges", "flow", (m) => m.edges.flow),
     "edges.flowSpeed": num("edges", "flowSpeed", (m) => m.edges.flowSpeed),
@@ -189,7 +210,6 @@ const KEYS: Record<string, Entry> = {
     "labels.innerItalic": bool("labels", "innerItalic", (m) => m.labels.innerItalic),
     "labels.innerUnderline": bool("labels", "innerUnderline", (m) => m.labels.innerUnderline),
     "labels.innerColor": color("labels", "innerColor", (m) => m.labels.innerColor),
-    "a11y.bold": bool("accessibility", "boldLabels", (m) => m.accessibility.boldLabels),
 
     "rank.mode": dropdown("ranking", "mode", (m) => m.ranking.mode),
     "rank.action": dropdown("ranking", "action", (m) => m.ranking.action),
@@ -218,6 +238,12 @@ const KEYS: Record<string, Entry> = {
     "clusters.tint": color("clusters", "tint", (m) => m.clusters.tint),
     "clusters.showLabels": bool("clusters", "showLabels", (m) => m.clusters.showLabels),
     "clusters.showSizes": bool("clusters", "showSizes", (m) => m.clusters.showSizes),
+    "clusters.labelFont": dropdown("clusters", "labelFont", (m) => m.clusters.labelFont),
+    "clusters.labelSize": num("clusters", "labelSize", (m) => m.clusters.labelSize),
+    "clusters.labelBold": bool("clusters", "labelBold", (m) => m.clusters.labelBold),
+    "clusters.labelItalic": bool("clusters", "labelItalic", (m) => m.clusters.labelItalic),
+    "clusters.labelColorMode": dropdown("clusters", "labelColorMode", (m) => m.clusters.labelColorMode),
+    "clusters.labelColor": color("clusters", "labelColor", (m) => m.clusters.labelColor),
     "clusters.groupBy": bool("clusters", "groupByCluster", (m) => m.clusters.groupByCluster),
     "clusters.groupStrength": num("clusters", "groupingStrength", (m) => m.clusters.groupingStrength),
     "clusters.clickFilter": bool("clusters", "clickToFilter", (m) => m.clusters.clickToFilter),
@@ -395,11 +421,12 @@ const paletteFilter = (g: (key: string) => unknown, _id: string, pal?: SBPalette
 
 export const SB_CATS: SBCategory[] = [
     { id: "layout", name: "Layout", flat: true, subs: [{ id: "layout", kind: "fields", fields: [
-        { control: "tiles", label: "Mode", key: "layout.mode",
-            options: [opt("force", "Force"), opt("circle", "Concentric"), opt("tree", "Tree"),
+        { control: "tiles", label: "Mode", key: "layout.mode", tileColumns: 3,
+            options: [opt("force", "Force"), opt("circle", "Concentric"), opt("ring", "Circular"),
+                opt("grid", "Grid"), opt("tree", "Tree"),
                 depOpt("geo", "Geo", (g) => !g("@hasGeo"), "Add valid Latitude and Longitude data to enable Geo layout.")],
-            tileIcons: { force: "force", circle: "concentric", tree: "tree", geo: "geo" },
-            info: "Force reveals general network clusters. Concentric puts the strongest hub in the centre and progressively lower-connectivity nodes on grouped outer rings. Tree uses the original layered hierarchy, chooses the most connected root when no Node parent is bound, and automatically applies maximum link curvature. Geo needs Latitude and Longitude. Choosing a mode clears a pinned layout so the new mode can run." },
+            tileIcons: { force: "force", circle: "concentric", ring: "circular", grid: "grid", tree: "tree", geo: "geo" },
+            info: "Force reveals general network clusters. Concentric puts the strongest hub in the centre and progressively lower-connectivity nodes on grouped outer rings. Circular places every node on a single ring in a crossing-minimising order. Grid arranges nodes on a stable square grid, hubs first. Tree uses the original layered hierarchy, chooses the most connected root when no Node parent is bound, and defaults to maximum link curvature (override it in Edges ▸ Curvature). Geo needs Latitude and Longitude. Choosing a mode clears a pinned layout so the new mode can run." },
         { control: "note", label: "Hierarchy inferred from link connectivity. Add a Node parent field when the report needs an exact business hierarchy.",
             visibleIf: (g) => String(g("layout.mode")) === "tree" && !g("@hasParent") },
         { control: "slider", label: "Repulsion", key: "layout.charge", min: 1, max: 200, step: 1,
@@ -533,8 +560,19 @@ export const SB_CATS: SBCategory[] = [
                 info: "Scales parent nodes only when a Node parent field is bound and Emphasise parents is on. 100% keeps their normal size." },
         ] },
         { id: "nodesClick", name: "On click", kind: "fields", fields: [
-            { control: "switch", label: "Show full info", key: "nodes.clickInfo",
-                note: "When enabled, cross-filtering may not work." },
+            // One action per node click (NG-248) — mutually exclusive by construction.
+            { control: "select", label: "Click action", key: "nodes.clickMode",
+                options: [
+                    opt("filter", "Cross-filter only"),
+                    opt("info", "Show full info"),
+                    opt("expand", "Expand / collapse"),
+                    opt("drilldown", "Drill-down")],
+                info: "A node click does exactly one thing. Cross-filter only keeps the standard report interaction; the other three each take over the click, so cross-filtering may not fire while one is active. Show full info opens the node detail panel; Expand / collapse folds a parent's descendants; Drill-down makes the clicked node the temporary root. Expand and Drill-down follow the bound Node parent, or a hierarchy derived from link connectivity." },
+            { control: "switch", label: "Start collapsed", key: "hierarchy.startCollapsed",
+                visibleIf: (g) => String(g("nodes.clickMode")) === "expand",
+                dimIf: (g) => String(g("nodes.clickMode")) !== "expand",
+                disabledReason: "Set Click action to Expand / collapse to start the hierarchy collapsed.",
+                info: "Has an effect only with Expand / collapse. The graph initially shows roots with descendants folded until the user expands them." },
         ] },
     ] },
     { id: "colors", name: "Colours", subs: [
@@ -640,13 +678,17 @@ export const SB_CATS: SBCategory[] = [
         { control: "slider", label: "Width", key: "edges.thick", min: 1, max: 12, step: 1,
             dimIf: (g) => !g("edges.show"),
             disabledReason: "Turn on Show links to change link width.",
-            info: "Has an effect only when Show links is on." },
-        { control: "slider", label: "Curvature", key: "edges.curve", min: 0, max: 100, step: 5,
-            dimIf: (g) => !g("edges.show") || String(g("layout.mode")) === "tree",
+            info: "Sets the width of the heaviest link. With Scale width by weight on, lighter links scale down from here; off, every link uses this width." },
+        { control: "switch", label: "Scale width by weight", key: "edges.scaleByWeight",
+            dimIf: (g) => !g("edges.show") || !g("@hasWeight"),
             disabledReasonFn: (g) => !g("edges.show")
-                ? "Turn on Show links to change link curvature."
-                : "Tree automatically uses maximum link curvature to separate relationships.",
-            info: "Tree automatically uses maximum curvature. In every other layout, this controls how strongly links bow." },
+                ? "Turn on Show links to scale width by weight."
+                : "Add data to the Edge weight field well to scale link width by weight.",
+            info: "On maps each link's width to its Edge weight — the heaviest link at Width, the lightest at 20% of it. Off draws every link at the flat Width." },
+        { control: "slider", label: "Curvature", key: "edges.curve", min: 0, max: 100, step: 5,
+            dimIf: (g) => !g("edges.show"),
+            disabledReason: "Turn on Show links to change link curvature.",
+            info: "How strongly links bow. Tree defaults to maximum curvature so relationships fan apart, but any value you set here wins — including 0 for straight links." },
         { control: "switch", label: "Link labels", key: "edges.showLabels",
             dimIf: (g) => !g("edges.show"),
             disabledReason: "Turn on Show links to enable link labels." },
@@ -655,7 +697,8 @@ export const SB_CATS: SBCategory[] = [
                 depOpt("weight", "Weight", (g) => !g("@hasWeight"), "Add data to the Edge weight field well to enable Weight labels."),
                 depOpt("type", "Edge type", (g) => !g("@hasEdgeType"), "Add data to the Edge type field well to enable Edge type labels."),
                 depOpt("weightPct", "Weight % of total", (g) => !g("@hasWeight"), "Add data to the Edge weight field well to enable Weight % of total."),
-                depOpt("betweenness", "Edge betweenness", (g) => Number(g("@nodeCount")) > 2000, "Edge betweenness is available for graphs with 2,000 nodes or fewer.")],
+                depOpt("betweenness", "Edge betweenness", (g) => Number(g("@nodeCount")) > 2000, "Edge betweenness is available for graphs with 2,000 nodes or fewer."),
+                opt("names", "Source → target")],
             dimIf: (g) => !g("edges.show") || !g("edges.showLabels"),
             disabledReasonFn: (g) => !g("edges.show")
                 ? "Turn on Show links to choose link-label content."
@@ -784,7 +827,7 @@ export const SB_CATS: SBCategory[] = [
                 disabledReasonFn: (g) => canvasWillRender(g)
                     ? "Inner labels require SVG rendering. Choose SVG or raise the Auto Canvas threshold."
                     : "Turn on Show inner label to change its colour.",
-                info: "Leave blank for automatic contrast against each node fill." },
+                info: "Leave blank for automatic contrast against each node fill (over the canvas for donut nodes)." },
         ] },
     ] },
     { id: "filter", name: "Filter", flat: true, subs: [{ id: "filter", kind: "fields", fields: [
@@ -944,6 +987,27 @@ export const SB_CATS: SBCategory[] = [
             { control: "switch", label: "Show sizes", key: "clusters.showSizes",
                 dimIf: (g) => !g("clusters.show") || !g("clusters.showLabels"),
                 info: "Requires both Show clusters and Cluster labels. Appends the member-node count to each cluster label." },
+            { control: "font", label: "Label font", key: "clusters.labelFont",
+                dimIf: (g) => !g("clusters.show") || !g("clusters.showLabels"),
+                disabledReason: "Turn on Cluster labels to style them." },
+            { control: "slider", label: "Label size", key: "clusters.labelSize", min: 8, max: 40, step: 1,
+                dimIf: (g) => !g("clusters.show") || !g("clusters.showLabels"),
+                disabledReason: "Turn on Cluster labels to style them." },
+            { control: "multiSeg", label: "Label style", keys: ["clusters.labelBold", "clusters.labelItalic"], glyphs: ["B", "I"],
+                dimIf: (g) => !g("clusters.show") || !g("clusters.showLabels"),
+                disabledReason: "Turn on Cluster labels to style them." },
+            { control: "select", label: "Label colour", key: "clusters.labelColorMode",
+                options: [opt("auto", "Auto (match cluster)"), opt("manual", "Manual")],
+                dimIf: (g) => !g("clusters.show") || !g("clusters.showLabels"),
+                disabledReason: "Turn on Cluster labels to style them.",
+                info: "Auto colours each caption to match its own cluster, so you can tell which label belongs to which cluster at a glance. Manual uses the fixed colour below." },
+            { control: "color", label: "Custom colour", key: "clusters.labelColor",
+                dimIf: (g) => !g("clusters.show") || !g("clusters.showLabels") || String(g("clusters.labelColorMode")) !== "manual",
+                disabledReasonFn: (g) => !g("clusters.showLabels")
+                    ? "Turn on Cluster labels to style them."
+                    : "Set Label colour to Manual to choose a fixed colour.",
+                visibleIf: (g) => String(g("clusters.labelColorMode")) === "manual",
+                info: "Leave blank to fall back to the theme's automatic label colour." },
             { control: "switch", label: "Group by cluster", key: "clusters.groupBy",
                 note: "Pull same-cluster nodes together so hulls stop overlapping (force layout)",
                 dimIf: (g) => !g("clusters.show") || String(g("layout.mode")) !== "force",
@@ -967,15 +1031,6 @@ export const SB_CATS: SBCategory[] = [
                     ? "Turn on Show clusters to enable hover emphasis."
                     : "Turn on Show hulls or Cluster labels to provide a hover target.",
                 info: "Requires Show clusters. Hovering a cluster hull or label dims nodes outside that cluster." },
-        ] },
-        { id: "hierarchy", name: "Hierarchy", kind: "fields", fields: [
-            { control: "switch", label: "Expand / collapse", key: "hierarchy.foldable",
-                info: "Click a parent node to fold or reveal its descendants. Bind Node parent for an explicit hierarchy." },
-            { control: "switch", label: "Start collapsed", key: "hierarchy.startCollapsed", dimIf: (g) => !g("hierarchy.foldable"),
-                disabledReason: "Turn on Expand / collapse to start the hierarchy collapsed.",
-                info: "Has an effect only when Expand / collapse is on. The graph initially shows roots with descendants folded until the user expands them." },
-            { control: "switch", label: "Drill-down", key: "hierarchy.drilldown",
-                info: "Lets a node become the temporary root of the visible hierarchy. Bind Node parent for business-defined drill paths; otherwise paths follow the derived hierarchy." },
         ] },
         { id: "scale", name: "Scale", kind: "fields", fields: [
             { control: "select", label: "Renderer", key: "scale.renderMode", options: [opt("auto", "Auto"), opt("svg", "SVG (interactive)"), opt("canvas", "Canvas (fast)")],
@@ -1021,7 +1076,7 @@ export const SB_CATS: SBCategory[] = [
     ] },
     // Note: the native Visual overlays card also owns a Format-pane-only master
     // switch (`bar.showOverlays`). The individual gear controls below remain mirrored
-    // here; Accessibility remains gear-only and Brand stays native-pane-only.
+    // here; Brand stays native-pane-only.
 ];
 
 /* Font list for the gear's font picker — id === css === the persisted stack, so

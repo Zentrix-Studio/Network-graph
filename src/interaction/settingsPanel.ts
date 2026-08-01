@@ -112,6 +112,14 @@ export class SettingsOverlay {
         this.cfg.set(key, value);
     }
 
+    /** Whether any of `keys` has an optimistic edit this session that the host has not yet
+     *  echoed back (NG-239/NG-242). The persisted-metadata signal only appears after
+     *  persistProperties round-trips, so a live gear drag would otherwise read as "untouched
+     *  default" for the first repaint (radius auto-scale, Tree curvature override, …). */
+    hasPendingEdit(...keys: string[]): boolean {
+        return keys.some((k) => this.pending.has(k));
+    }
+
     /** Apply several edits initiated by one external UI action as one repaint and one
      *  authoring-history transaction (for example closing a multi-section panel). */
     setValues(values: Record<string, unknown>): void {

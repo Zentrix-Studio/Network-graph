@@ -59,6 +59,26 @@ function ensureShadow(g: G): string {
 /** Approximate text advance (no getBBox). */
 function advance(s: string, size = 12): number { return s.length * size * 0.58; }
 
+/** Rendered width of a section title as actually drawn: 10px caps with 1.6px
+ *  letter-spacing (the extra spacing sits between every glyph). Section widths must
+ *  include this or a long driver name ("Bridge (Betweenness)") overflows the card and
+ *  collides with the collapse chevron (86d3vdtcj). */
+const TITLE_FONT = 10;
+const TITLE_LETTER_SPACING = 1.6;
+/** Horizontal room the collapse chevron needs to the right of the title row. */
+const CHEVRON_RESERVE = 20;
+function titleWidth(title: string): number {
+    const n = title.length;
+    return advance(title, TITLE_FONT) + Math.max(0, n - 1) * TITLE_LETTER_SPACING;
+}
+/** Truncate a title to fit `availPx`, appending an ellipsis (never a hard mid-word clip). */
+function fitTitle(title: string, availPx: number): string {
+    if (titleWidth(title) <= availPx) return title;
+    let s = title;
+    while (s.length > 1 && titleWidth(s + "…") > availPx) s = s.slice(0, -1);
+    return s.length > 1 ? s + "…" : s;
+}
+
 function sectionRows(s: LegendSection): number {
     if (s.kind === "swatch") {
         const max = s.maxItems ?? 8;
@@ -75,14 +95,18 @@ function sectionHeight(s: LegendSection): number {
 
 /** Content width a section wants (excluding card padding). */
 function sectionWidth(s: LegendSection): number {
-    if (s.kind === "gradient") return 150;
+    // Every section reserves room for its (letter-spaced) title plus the collapse
+    // chevron that rides the first title row (86d3vdtcj) — previously the gradient
+    // section ignored its title entirely and returned a flat 150.
+    const titleW = titleWidth(s.title) + CHEVRON_RESERVE;
+    if (s.kind === "gradient") return Math.max(150, titleW);
     if (s.kind === "lines") {
-        const longest = s.samples.reduce((m, x) => Math.max(m, advance(x.label)), advance(s.title, 10));
-        return LINE_SAMPLE_W + 14 + longest;
+        const longest = s.samples.reduce((m, x) => Math.max(m, advance(x.label)), 0);
+        return Math.max(titleW, LINE_SAMPLE_W + 14 + longest);
     }
     const max = s.maxItems ?? 8;
     const shown = s.items.slice(0, max);
-    let w = advance(s.title, 10) * 1.15; // letter-spaced title
+    let w = titleW;
     for (const it of shown) {
         const count = it.count != null ? 18 + advance(String(it.count)) : 0;
         w = Math.max(w, SWATCH + 10 + advance(truncate(it.label, 18)) + count);
@@ -162,10 +186,13 @@ export function renderLegendCard(
                 .attr("stroke", surface.edge).attr("stroke-opacity", hc ? 1 : 0.22);
             cy += DIVIDER_H;
         }
+        // Only the first title shares its row with the collapse chevron; reserve room
+        // for it there and ellipsize rather than run under it (86d3vdtcj).
+        const titleAvail = boxW - PAD - (si === 0 && collapse ? CHEVRON_RESERVE : PAD);
         g.append("text").attr("x", x + PAD).attr("y", cy + 12)
             .attr("font-family", fontFamily).attr("font-size", 10)
             .attr("font-weight", 700).attr("letter-spacing", 1.6)
-            .attr("fill", surface.muted).text(s.title.toUpperCase());
+            .attr("fill", surface.muted).text(fitTitle(s.title, titleAvail).toUpperCase());
         const bodyY = cy + TITLE_H;
         if (s.kind === "swatch") drawSwatchRows(g, s, x, bodyY, boxW, surface, hc);
         else if (s.kind === "lines") drawLineRows(g, s, x, bodyY, surface, hc);

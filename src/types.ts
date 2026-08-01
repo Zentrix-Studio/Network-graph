@@ -10,7 +10,7 @@
 export * from "./model/graphTypes";
 
 /** Why the visual is showing guidance instead of a graph. */
-export type EmptyReason = "noData" | "needSource" | "needTarget";
+export type EmptyReason = "noData" | "needSource" | "needTarget" | "noRows";
 
 /**
  * Per-node presentation attributes resolved from the DataView, indexed parallel
@@ -81,6 +81,13 @@ export interface GraphData {
     hasTime: boolean;
     /** Non-null when the row window was capped — drives the "showing N of M" note. */
     truncated: { shownRows: number; totalRows: number } | null;
+    /** Inbound cross-highlight (another visual filtered THIS graph in Highlight mode):
+     *  per-edge match flag parallel to `edges`. true = the edge is in the highlighted
+     *  set, false = dimmed. Absent when no inbound highlight is active. Only delivered
+     *  by the categorical dataView mapping (needs a bound measure). */
+    edgeHighlight?: boolean[];
+    /** True when an inbound highlight is active (some rows highlighted, some not). */
+    hasInboundHighlight?: boolean;
     /** Display names of the bound columns, per role (null when the role is unbound
      *  or the column has no name). Native tooltips label rows with these so the
      *  card reads "field name : value", not a generic "Node : value" (NG-111). */

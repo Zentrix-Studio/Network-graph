@@ -6,9 +6,8 @@
  * object name — that string identity is the persistence contract.
  *
  * MVP note: the shipping design (kickoff) makes an in-visual gear bar the primary
- * settings surface and force-reduces the native Format pane to
- * `{ toolbar, branding }`. Accessibility remains available in the in-visual gear;
- * it is intentionally omitted from Power BI's native pane.
+ * settings surface and force-reduces the native Format pane to `{ toolbar, branding }`.
+ * Everything else is edited via the in-visual gear.
  */
 
 import { formattingSettings } from "powerbi-visuals-utils-formattingmodel";
@@ -65,6 +64,7 @@ class LayoutCard extends Card {
     mode = new ItemDropdown({
         name: "mode", displayName: "Layout",
         items: [item("force", "Force-directed"), item("circle", "Concentric"),
+            item("ring", "Circular"), item("grid", "Grid"),
             item("tree", "Tree / org-chart"), item("geo", "Geo-route (lat/long)")],
         value: item("force", "Force-directed"),
     });
@@ -188,10 +188,11 @@ class NodesCard extends Card {
     // (the raw, un-collapsed directed view). Default ON so the standard picture stays
     // merged; turn OFF for the split view.
     mergeDuplicates = new ToggleSwitch({ name: "mergeDuplicates", displayName: "Merge duplicate nodes", value: true });
-    // Optional full-height information panel. Off by default so ordinary node clicks
-    // remain dedicated to report cross-filtering unless the author opts in.
+    // Full-height information panel on node click. The default node-click action (NG-248):
+    // ON so a click surfaces the node's full detail out of the box; the On-click selector
+    // lets the author switch to cross-filter-only, expand/collapse, or drill-down instead.
     showFullInfoOnClick = new ToggleSwitch({
-        name: "showFullInfoOnClick", displayName: "Show full info on click", value: false,
+        name: "showFullInfoOnClick", displayName: "Show full info on click", value: true,
     });
 
     name = "nodes";
@@ -360,6 +361,10 @@ class EdgesCard extends Card {
     // to 20% of it (NG-133d). A 2px default keeps the graph crisp while arrows carry
     // direction out of the box.
     thickness = new NumUpDown({ name: "thickness", displayName: "Width", value: 2 });
+    // Scale each link's width by its Edge-weight value (86d3wdnav). On by default so a
+    // bound Edge weight visibly drives thickness (heaviest link = Width, lightest = 20%);
+    // off renders every link at the flat Width. No effect when no Edge weight is bound.
+    scaleByWeight = new ToggleSwitch({ name: "scaleByWeight", displayName: "Scale width by weight", value: true });
     // Global edge curvature 0..100 (NG-075). 0 = straight; parallel edges always fan apart.
     curve = new NumUpDown({ name: "curve", displayName: "Curvature", value: 0 });
     // Edge (link) labels at the midpoint — the weight, or the bound Edge-type value.
@@ -367,7 +372,8 @@ class EdgesCard extends Card {
     labelSource = new ItemDropdown({
         name: "labelSource", displayName: "Link label",
         items: [item("weight", "Weight"), item("type", "Edge type"),
-            item("weightPct", "Weight % of total"), item("betweenness", "Edge betweenness")],
+            item("weightPct", "Weight % of total"), item("betweenness", "Edge betweenness"),
+            item("names", "Source → target")],
         value: item("weight", "Weight"),
     });
     flow = new ToggleSwitch({ name: "flow", displayName: "Animate flow", value: false });
@@ -375,7 +381,7 @@ class EdgesCard extends Card {
 
     name = "edges";
     displayName = "Edges";
-    slices = [this.show, this.showOnHover, this.colorMode, this.color, this.showArrows, this.bidirectional, this.thickness, this.curve, this.showLabels, this.labelSource, this.flow, this.flowSpeed];
+    slices = [this.show, this.showOnHover, this.colorMode, this.color, this.showArrows, this.bidirectional, this.thickness, this.scaleByWeight, this.curve, this.showLabels, this.labelSource, this.flow, this.flowSpeed];
 }
 
 // --- Labels (full text control — font / size / style / colour / wrap) -------
@@ -554,6 +560,23 @@ class ClustersCard extends Card {
     // --- Cluster captions ---
     showLabels = new ToggleSwitch({ name: "showLabels", displayName: "Cluster labels", value: false });
     showSizes = new ToggleSwitch({ name: "showSizes", displayName: "Show sizes", value: false });
+    // Caption typography (NG-246). Own controls so cluster captions can be styled apart
+    // from node labels; colour blank = the theme foreground.
+    labelFont = new ItemDropdown({
+        name: "labelFont", displayName: "Label font", items: LABEL_FONT_ITEMS,
+        value: LABEL_FONT_ITEMS.find((font) => font.displayName === "Trebuchet MS") ?? DEFAULT_LABEL_FONT,
+    });
+    labelSize = new NumUpDown({ name: "labelSize", displayName: "Label size", value: 12 });
+    labelBold = new ToggleSwitch({ name: "labelBold", displayName: "Label bold", value: true });
+    labelItalic = new ToggleSwitch({ name: "labelItalic", displayName: "Label italic", value: false });
+    // Auto = each caption takes its own cluster's colour (so a label maps to its region at a
+    // glance); Manual = the fixed colour below (NG-247).
+    labelColorMode = new ItemDropdown({
+        name: "labelColorMode", displayName: "Label colour",
+        items: [item("auto", "Auto (match cluster)"), item("manual", "Manual")],
+        value: item("auto", "Auto (match cluster)"),
+    });
+    labelColor = new ColorPicker({ name: "labelColor", displayName: "Custom label colour", value: { value: "" } });
 
     // --- Layout influence ---
     groupByCluster = new ToggleSwitch({ name: "groupByCluster", displayName: "Group by cluster", value: false });
@@ -567,7 +590,9 @@ class ClustersCard extends Card {
     displayName = "Clusters (Enterprise)";
     slices = [this.show, this.clusterBy, this.resolution, this.minClusterSize, this.maxClusters, this.collapse,
         this.showHulls, this.hullStyle, this.hullPadding, this.fillOpacity, this.borderWidth, this.borderOpacity,
-        this.colorSource, this.tint, this.showLabels, this.showSizes, this.groupByCluster, this.groupingStrength,
+        this.colorSource, this.tint, this.showLabels, this.showSizes,
+        this.labelFont, this.labelSize, this.labelBold, this.labelItalic, this.labelColorMode, this.labelColor,
+        this.groupByCluster, this.groupingStrength,
         this.clickToFilter, this.hoverEmphasis];
 }
 
@@ -724,15 +749,6 @@ class ToolbarCard extends Card {
     slices = [this.showOverlays, this.show, this.closeOnClickAway, this.actions, this.position];
 }
 
-// --- Accessibility (gear-only; behavior still applies to the visual) --------
-class AccessibilityCard extends Card {
-    boldLabels = new ToggleSwitch({ name: "boldLabels", displayName: "Bold labels", value: false });
-
-    name = "accessibility";
-    displayName = "Accessibility";
-    slices = [this.boldLabels];
-}
-
 // --- Branding ---------------------------------------------------------------
 class BrandingCard extends Card {
     show = new ToggleSwitch({ name: "show", displayName: "Show Zentrix mark", value: true });
@@ -746,7 +762,6 @@ class BrandingCard extends Card {
  * The in-visual gear is the primary settings surface; the native Format pane is
  * force-reduced to two cards: "Visual overlays" controls all visual chrome (plus
  * its individual gear/actions), and Branding controls the removable mark.
- * Accessibility stays available in the gear but is deliberately hidden here.
  */
 const PANE_CARDS = new Set<string>(["toolbar", "branding"]);
 
@@ -773,11 +788,10 @@ export class VisualFormattingSettingsModel extends Model {
     annotations = new AnnotationsCard();
     summaryTable = new SummaryTableCard();
     toolbar = new ToolbarCard();
-    accessibility = new AccessibilityCard();
     branding = new BrandingCard();
 
     cards = [this.layout, this.pin, this.nodes, this.parents, this.colors, this.edges, this.tooltip, this.labels, this.ranking, this.centrality,
-        this.cformat, this.clusters, this.hierarchy, this.scale, this.insights, this.find, this.explore, this.path, this.temporal, this.annotations, this.summaryTable, this.toolbar, this.accessibility, this.branding];
+        this.cformat, this.clusters, this.hierarchy, this.scale, this.insights, this.find, this.explore, this.path, this.temporal, this.annotations, this.summaryTable, this.toolbar, this.branding];
 
     constructor() {
         super();

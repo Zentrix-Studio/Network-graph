@@ -90,6 +90,9 @@ export interface GraphRenderOptions {
     /** Optional per-edge midpoint label (weight / edge-type); null = no label. */
     edgeLabelOf?: (i: number) => string | null;
     edgeThickness: number;
+    /** When false, edges render at the flat Width instead of scaling by Edge weight
+     *  (86d3wdnav / NG-234). Defaults to true when omitted. */
+    edgeScaleByWeight?: boolean;
     /** Global edge curvature 0..100 (NG-075); 0 = straight. Parallel edges always fan. */
     edgeCurve?: number;
     nodeStroke: string;
@@ -170,7 +173,7 @@ export function renderGraph(
     const geo = fitTransform(layout, opts.width, opts.height, maxR + 10, opts.padTop ?? 0);
     if (opts.postFit) opts.postFit(geo);
 
-    const edgeWidthOf = makeEdgeWidth(model, opts.edgeThickness);
+    const edgeWidthOf = makeEdgeWidth(model, opts.edgeThickness, opts.edgeScaleByWeight !== false);
     const edgeWidth = (w: number): number => edgeWidthOf(-1, w); // by-weight (SVG call sites)
 
     // Link visibility (req 1). "off" clears every edge; "hover" draws them but with a
@@ -582,7 +585,12 @@ export function renderGraph(
             } else {
                 el.attr("transform", `translate(${p.x},${p.y})`)
                     .attr("d", shapePath(shape, r))
-                    .attr("fill-rule", shape === "donut" ? "evenodd" : null);
+                    .attr("fill-rule", shape === "donut" ? "evenodd" : null)
+                    // A donut's centre is an unpainted evenodd hole, so the default
+                    // hit-test ignores it and only the ring is hoverable/clickable. Make
+                    // the whole node respond so hovering the centre still shows the tooltip
+                    // and cross-filters (NG-242).
+                    .attr("pointer-events", shape === "donut" ? "bounding-box" : null);
                 applyFill(el, i);
             }
         });
@@ -796,8 +804,15 @@ export function edgeOpacityFor(width: number): number {
  * between a small fixed lower limit and that upper limit, so a huge Edge-weight measure
  * can never exceed the Width the user set. Uniform weights → every link at the set Width.
  * Returns `(li, w?)`: pass a link index, or `w` directly (li = -1) for by-weight callers.
+ *
+ * `scaleByWeight` (86d3wdnav / NG-234): when false, every link renders at the flat Width
+ * regardless of its Edge-weight value — the author has opted out of thickness-encoding. On
+ * by default so a bound Edge weight visibly drives thickness out of the box; the Edges card
+ * exposes the toggle (dimmed when no Edge weight is bound, where scaling has no effect).
  */
-export function makeEdgeWidth(model: GraphModel, edgeThickness: number): (li: number, w?: number) => number {
+export function makeEdgeWidth(
+    model: GraphModel, edgeThickness: number, scaleByWeight = true,
+): (li: number, w?: number) => number {
     let minW = Infinity, maxW = 0;
     for (const l of model.links) {
         if (l.source === l.target) continue;
@@ -809,6 +824,7 @@ export function makeEdgeWidth(model: GraphModel, edgeThickness: number): (li: nu
     const maxPx = Math.max(0.5, edgeThickness);        // Width = the thickest link
     const minPx = Math.max(0.75, maxPx * 0.2);         // thinnest = 20% of Width (kept visible)
     return (li: number, w?: number): number => {
+        if (!scaleByWeight) return maxPx;              // opted out → flat Width for every link
         const weight = li >= 0 ? model.links[li].weight : (w ?? 1);
         if (!(sMax > sMin)) return maxPx;              // no weight spread → the set Width for all
         const t = (Math.sqrt(Math.max(0, weight)) - sMin) / (sMax - sMin);

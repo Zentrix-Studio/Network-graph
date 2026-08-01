@@ -1,0 +1,26 @@
+{
+    "Role_Source": "Source node",
+    "Role_Target": "Target node",
+    "Role_Weight": "Edge weight",
+    "Role_NodeCategory": "Node category",
+    "Role_NodeSize": "Node size",
+    "Role_NodeParent": "Node parent",
+    "Role_Latitude": "Latitude",
+    "Role_Longitude": "Longitude",
+    "Role_EdgeType": "Edge type",
+    "Role_Time": "Time",
+    "Role_NodeImage": "Node image",
+    "Role_NodeIcon": "Node icon",
+    "Role_Tooltips": "Tooltips",
+
+    "Layout_Force": "Force-directed",
+    "Layout_Concentric": "Concentric",
+    "Layout_Circular": "Circular",
+    "Layout_Grid": "Grid",
+    "Layout_Tree": "Tree / org-chart",
+    "Layout_Geo": "Geo-route (lat/long)",
+
+    "Empty_NoData": "Add fields to begin",
+    "Empty_NeedSource": "Add a Source node field",
+    "Empty_NeedTarget": "Add a Target node field"
+}

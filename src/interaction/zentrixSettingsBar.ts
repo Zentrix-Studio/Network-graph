@@ -276,6 +276,7 @@ const TILE_ICONS: Record<string, () => SVGSVGElement> = {
     concentric: () => mkTile(s => { shC(s, 9, 9, 6.2); shC(s, 9, 9, 3.7); shC(s, 9, 9, 1.35, { fill: true }); }),
     tree: () => mkTile(s => { shC(s, 9, 3.6, 1.7); shC(s, 4.5, 13.5, 1.7); shC(s, 13.5, 13.5, 1.7); shP(s, "M9 5.4 9 8.2"); shP(s, "M9 8.2 4.5 11.8"); shP(s, "M9 8.2 13.5 11.8"); }),
     geo: () => mkTile(s => { shC(s, 9, 9, 6.5); shP(s, "M2.5 9h13"); shP(s, "M9 2.5c2.4 1.8 2.4 11.2 0 13"); shP(s, "M9 2.5c-2.4 1.8-2.4 11.2 0 13"); }),
+    grid: () => mkTile(s => { shC(s, 5.5, 5.5, 1.6, { fill: true }); shC(s, 12.5, 5.5, 1.6, { fill: true }); shC(s, 5.5, 12.5, 1.6, { fill: true }); shC(s, 12.5, 12.5, 1.6, { fill: true }); }),
     // node-shape tiles (Nodes ▸ Style ▸ Shape) — outline glyphs of each marker shape
     shapeCircle: () => mkTile(s => { shC(s, 9, 9, 5.5); }),
     shapeSquare: () => mkTile(s => { shR(s, 3.5, 3.5, 11, 11, 1.5); }),
@@ -330,6 +331,9 @@ export class ZentrixSettingsBar {
     private resetBtn: HTMLButtonElement | null = null;
     private resetArmed = false;                  // two-tap confirm state for Reset
     private resetTimer: number | null = null;    // auto-disarm timer for Reset
+    private cardResetBtn: HTMLButtonElement | null = null;
+    private cardResetArmed = false;              // two-tap confirm state for the per-card reset
+    private cardResetTimer: number | null = null;// auto-disarm timer for the per-card reset
     private fieldInfoId = 0;                     // aria-describedby ids for field help
     private activeFieldHelp: HTMLElement | null = null;
     private activeFieldTip: HTMLElement | null = null;
@@ -430,6 +434,7 @@ export class ZentrixSettingsBar {
         this.hideFieldInfo();
         if (this.closeTimer) { clearTimeout(this.closeTimer); this.closeTimer = null; }
         if (this.resetTimer) { clearTimeout(this.resetTimer); this.resetTimer = null; }
+        this.disarmCardReset(); this.cardResetBtn = null;
         if (this.ro) { this.ro.disconnect(); this.ro = null; }
         if (this.onDoc) { document.removeEventListener("mousedown", this.onDoc); this.onDoc = null; }
         if (this.onKey) { document.removeEventListener("keydown", this.onKey); this.onKey = null; }
@@ -448,6 +453,7 @@ export class ZentrixSettingsBar {
         if (!this.open && !this.bar) return;
         this.hideFieldInfo();
         this.disarmReset(); this.resetBtn = null;
+        this.disarmCardReset(); this.cardResetBtn = null;
         this.open = false; this.activeCat = this.activeSub = this.exp = null;
         if (this.ro) { this.ro.disconnect(); this.ro = null; }
         if (this.onDoc) { document.removeEventListener("mousedown", this.onDoc); this.onDoc = null; }
@@ -669,6 +675,7 @@ export class ZentrixSettingsBar {
     }
     private closePop(): void {
         this.hideFieldInfo();
+        this.disarmCardReset(); this.cardResetBtn = null;
         this.activeCat = this.activeSub = this.exp = null;
         if (this.pop) { this.pop.remove(); this.pop = null; }
         this.detailWrap = this.detailInner = null;
@@ -710,15 +717,21 @@ export class ZentrixSettingsBar {
         this.pop.style.width = `${catMaxWidth(c) + POP_PAD}px`;
         this.pop.onclick = (e) => e.stopPropagation();
 
+        this.disarmCardReset(); this.cardResetBtn = null;
         const head = div("zsb-pop-head");
         head.appendChild(Object.assign(document.createElement("span"), { className: "zsb-pop-title", textContent: c.name }));
         // Per-card reset — reverts just this category's keys to their model defaults.
         // Only shown when the host wired cfg.resetKeys (the global Reset still exists on the bar).
+        // Uses the same two-tap confirm as the global Reset (NG-229): the circular-arrow
+        // glyph reads as a passive "refresh", so a single click must never silently discard
+        // a card's settings — the first tap arms and reveals a "Reset?" confirm label.
         if (typeof this.cfg.resetKeys === "function") {
             const rb = btn("zsb-card-reset"); rb.type = "button";
             rb.title = `Reset ${c.name} to defaults`; rb.setAttribute("aria-label", `Reset ${c.name} to defaults`);
             rb.appendChild(resetIcon());
-            rb.onclick = (e) => { e.stopPropagation(); this.resetCategory(c); };
+            rb.appendChild(Object.assign(document.createElement("span"), { className: "zsb-card-reset-label", textContent: "Reset?" }));
+            rb.onclick = (e) => { e.stopPropagation(); this.onCardReset(rb, c); };
+            this.cardResetBtn = rb;
             head.appendChild(rb);
         }
         this.pop.appendChild(head);
@@ -762,6 +775,27 @@ export class ZentrixSettingsBar {
         }
         this.cfg.resetKeys([...keys]);
         this.refreshActiveDetail();
+    }
+
+    /** Two-tap confirm for the per-card reset (mirrors onReset). First tap arms the
+     *  button — it grows a "Reset?" label and turns accented; a second tap within the
+     *  window commits the revert. A timeout, re-open, or pop close disarms it. */
+    private onCardReset(b: HTMLButtonElement, c: SBCategory): void {
+        if (!this.cardResetArmed) {
+            this.cardResetArmed = true;
+            b.classList.add("zsb-card-reset--armed");
+            if (this.cardResetTimer) clearTimeout(this.cardResetTimer);
+            this.cardResetTimer = (setTimeout(() => this.disarmCardReset(), 2600) as unknown) as number;
+            return;
+        }
+        this.disarmCardReset();
+        this.resetCategory(c);
+    }
+
+    private disarmCardReset(): void {
+        if (this.cardResetTimer) { clearTimeout(this.cardResetTimer); this.cardResetTimer = null; }
+        this.cardResetArmed = false;
+        this.cardResetBtn?.classList.remove("zsb-card-reset--armed");
     }
 
     /** Rebuild the detail inner and animate the wrapper to its new measured height. */
@@ -965,7 +999,7 @@ export class ZentrixSettingsBar {
     /** Mark one unavailable option without disabling its parent field. The compact
      *  question mark uses our themed tooltip immediately; native `title` help is
      *  deliberately avoided because browsers delay and style it inconsistently. */
-    private applyOptionDependency(button: HTMLButtonElement, option: SBOption, aria?: string): boolean {
+    private applyOptionDependency(button: HTMLButtonElement, option: SBOption, aria?: string, withGlyph = true): boolean {
         if (!isOptionConfig(option) || !option.disabledIf?.(k => this.cfg.get(k))) return false;
         const reason = option.disabledReasonFn?.(k => this.cfg.get(k)) ?? option.disabledReason ?? "This option is unavailable.";
         const id = `zsb-option-dependency-${++this.fieldInfoId}`;
@@ -973,13 +1007,25 @@ export class ZentrixSettingsBar {
         button.setAttribute("aria-disabled", "true");
         button.setAttribute("aria-label", `${aria ?? optLabel(option)} — unavailable. ${reason}`);
         button.setAttribute("aria-describedby", id);
-        const help = Object.assign(document.createElement("span"), {
-            className: "zsb-option-dependency", textContent: "?",
-        });
         const tip = Object.assign(div("zsb-field-info-tip zsb-option-dependency-tip"), {
             id, textContent: reason,
         });
         tip.setAttribute("role", "tooltip");
+        // Tiles opt out of the visible "?" badge (it adds a row and clutters the grid).
+        // The same instant, styled tooltip still fires — but anchored to the whole
+        // disabled tile instead of a "?" span (and NOT via a native `title`, which would
+        // show the OS's generic dark tooltip). Both tile rows keep the same height.
+        if (!withGlyph) {
+            button.appendChild(tip);
+            button.onmouseenter = () => this.showFieldInfo(button, tip);
+            button.onmouseleave = () => this.hideFieldInfo(button, tip);
+            button.onfocus = () => this.showFieldInfo(button, tip);
+            button.onblur = () => this.hideFieldInfo(button, tip);
+            return true;
+        }
+        const help = Object.assign(document.createElement("span"), {
+            className: "zsb-option-dependency", textContent: "?",
+        });
         help.appendChild(tip);
         help.onmouseenter = () => this.showFieldInfo(help, tip);
         help.onmouseleave = () => this.hideFieldInfo(help, tip);
@@ -1110,6 +1156,10 @@ export class ZentrixSettingsBar {
         const valBox = el("input", "zsb-slider-val"); valBox.type = "number";
         valBox.min = String(min); valBox.max = String(max); valBox.step = String(step);
         valBox.value = String(val); valBox.setAttribute("aria-label", aria);
+        // Size the box to the widest value the slider can hold (e.g. 20000 / 50000) so large
+        // thresholds never crop. `ch` is the mono digit width; +1 leaves room for the caret.
+        const widestChars = Math.max(String(Math.trunc(min)).length, String(Math.trunc(max)).length);
+        valBox.style.width = `${widestChars + 1}ch`;
         const valWrap = div("zsb-slider-valwrap"); valWrap.appendChild(valBox);
         if (f.suffix) valWrap.appendChild(Object.assign(div("zsb-slider-sfx"), { textContent: f.suffix }));
 
@@ -1169,7 +1219,10 @@ export class ZentrixSettingsBar {
             b.appendChild(Object.assign(div("zsb-tile-lbl"), { textContent: optLabel(o) }));
             const sel = cur() === v; b.setAttribute("data-active", String(sel)); b.setAttribute("aria-checked", String(sel));
             b.setAttribute("aria-label", `${aria}: ${optLabel(o)}`);
-            const disabled = this.applyOptionDependency(b, o, `${aria}: ${optLabel(o)}`);
+            const disabled = this.applyOptionDependency(b, o, `${aria}: ${optLabel(o)}`, false);
+            // NG-231: full name on hover, backing the label's ellipsis fallback. Disabled
+            // tiles already carry their unavailability reason as the native title.
+            if (!disabled) b.title = optLabel(o);
             b.onclick = () => {
                 if (disabled) return;
                 body.querySelectorAll(".zsb-tile").forEach(x => { x.setAttribute("data-active", "false"); x.setAttribute("aria-checked", "false"); });
@@ -1941,9 +1994,14 @@ const CSS = `
   border:1px solid var(--rd-card-bd); border-radius:12px; box-shadow:0 2px 6px rgba(16,24,40,.05),0 16px 40px -16px rgba(16,24,40,.22); }
 .zsb-anchor .zsb-pop-head{ height:38px; padding:0 12px 0 14px; gap:8px; background:none; border-bottom:1px solid var(--rd-sep); }
 .zsb-anchor .zsb-pop-title{ font:600 10px var(--font-mono); letter-spacing:.9px; text-transform:uppercase; color:var(--rd-label); }
-.zsb-card-reset{ width:24px; height:24px; display:grid; place-items:center; border:0; border-radius:6px; background:transparent; color:var(--rd-muted); cursor:pointer; transition:.12s; flex:none; }
+.zsb-card-reset{ height:24px; min-width:24px; padding:0 6px; display:inline-flex; align-items:center; justify-content:center; gap:5px; border:0; border-radius:6px; background:transparent; color:var(--rd-muted); cursor:pointer; transition:.12s; flex:none; }
 .zsb-card-reset:hover{ background:var(--hover-overlay); color:var(--rd-accent); }
 .zsb-card-reset svg{ width:13px; height:13px; }
+/* NG-229: armed (first-tap) state — reveal the confirm label so the circular-arrow
+   glyph can never be mistaken for a passive "refresh" that silently discards settings. */
+.zsb-card-reset-label{ display:none; font:600 9.5px var(--font-mono); letter-spacing:.6px; text-transform:uppercase; }
+.zsb-card-reset--armed{ background:var(--rd-accent-soft); color:var(--rd-accent); }
+.zsb-card-reset--armed .zsb-card-reset-label{ display:inline; }
 
 /* tab strip (replaces the old left rail for multi-sub categories) */
 .zsb-tabs{ display:flex; padding:0 14px; border-bottom:1px solid var(--rd-sep); }
@@ -1996,20 +2054,29 @@ const CSS = `
   font:500 10.5px var(--font-ui); box-shadow:none; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .zsb-anchor .zsb-seg-btn:hover{ color:var(--rd-val); }
 .zsb-anchor .zsb-seg-btn[data-active="true"]{ background:var(--rd-white); color:var(--rd-val); font-weight:600; box-shadow:0 1px 2px rgba(16,24,40,.12); }
+/* Wrap segmented-text controls to a second row inside the popover instead of
+   squeezing 4+ / long options into illegible ellipsised 25% columns (86d3ve1xy —
+   "Importance" was clipping to "Importanc"). min-width:max-content is the floor, so
+   text can never shrink below its own width; short 2–3 option controls still sit on
+   one row. Same "wrap, never hard-clip" principle as the layout tiles (NG-231). */
+.zsb-anchor .zsb-seg.zsb-seg-wrap{ flex-wrap:wrap; }
+.zsb-anchor .zsb-seg.zsb-seg-wrap .zsb-seg-btn{ flex:1 1 auto; min-width:max-content; overflow:visible; text-overflow:clip; }
 
 /* layout-mode tiles */
-.zsb-tiles{ display:grid; gap:4px; }
-.zsb-tile{ min-width:0; display:flex; flex-direction:column; align-items:center; gap:4px; padding:7px 0 6px; border:1px solid var(--rd-card-bd);
+.zsb-tiles{ display:grid; gap:4px; grid-auto-rows:1fr; }
+.zsb-tile{ min-width:0; overflow:hidden; display:flex; flex-direction:column; align-items:center; gap:4px; padding:7px 4px 6px; border:1px solid var(--rd-card-bd);
   border-radius:6px; background:var(--rd-card-bg); color:var(--rd-label); cursor:pointer; transition:.12s; }
 .zsb-tile:hover{ border-color:var(--rd-accent); color:var(--rd-accent); }
 .zsb-tile[data-active="true"]{ border:1.5px solid var(--rd-accent); background:var(--rd-accent-soft); color:var(--rd-accent); }
-.zsb-tile svg{ width:16px; height:16px; }
-.zsb-tile-lbl{ font:600 9px var(--font-ui); }
+.zsb-tile svg{ width:16px; height:16px; flex:none; }
+/* label must never spill past its own tile into the neighbour's (NG-231): clamp to the
+   tile width and ellipsis any overflow. The full name stays available via the tile title. */
+.zsb-tile-lbl{ font:600 9px var(--font-ui); max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
 /* slider — custom rail + fill + knob, transparent native range on top */
 .zsb-slider-valwrap{ display:flex; align-items:center; justify-content:flex-end; gap:3px; min-width:36px; height:22px; padding:0 6px;
   border:1px solid var(--rd-card-bd); border-radius:5px; }
-.zsb-slider-val{ width:24px; min-width:0; border:0; background:transparent; text-align:right; font:500 11px var(--font-mono); color:var(--rd-val);
+.zsb-slider-val{ width:24px; min-width:24px; box-sizing:content-box; flex:none; border:0; background:transparent; text-align:right; font:500 11px var(--font-mono); color:var(--rd-val);
   outline:none; padding:0; -moz-appearance:textfield; appearance:textfield; }
 .zsb-slider-val::-webkit-outer-spin-button,.zsb-slider-val::-webkit-inner-spin-button{ -webkit-appearance:none; margin:0; }
 .zsb-slider-sfx{ font:500 10px var(--font-mono); color:var(--rd-val); }

@@ -333,3 +333,58 @@ export function circularLayout(
     }
     return { positions, bounds: boundsOf(positions), iterations: 0 };
 }
+
+/**
+ * Single-perimeter Circular layout — every node on ONE ring, sequenced by the
+ * same graph-aware cyclic order as Concentric (minimises edge span, keeps
+ * business groups contiguous). Distinct from Concentric (`circle`), which fans
+ * core→periphery across nested rings. Pure and deterministic.
+ */
+export function ringLayout(
+    model: GraphModel,
+    config: CircularLayoutConfig = {},
+): LayoutResult {
+    const n = model.nodes.length;
+    const positions: Vec2[] = new Array(n);
+    if (n === 0) return { positions, bounds: boundsOf(positions), iterations: 0 };
+    if (n === 1) { positions[0] = { x: 0, y: 0 }; return { positions, bounds: boundsOf(positions), iterations: 0 }; }
+    const order = circularOrder(model, config.groups);
+    // Radius large enough that unequal glyphs don't overlap: circumference ≥ n·spacing.
+    const maxR = config.nodeRadii && config.nodeRadii.length ? Math.max(12, ...config.nodeRadii) : 16;
+    const spacing = maxR * 2.6;
+    const radius = Math.max(160, (n * spacing) / (2 * Math.PI));
+    for (let slot = 0; slot < n; slot++) {
+        const node = order[slot];
+        const theta = (slot / n) * Math.PI * 2 - Math.PI / 2; // start at 12 o'clock
+        positions[node] = { x: radius * Math.cos(theta), y: radius * Math.sin(theta) };
+    }
+    return { positions, bounds: boundsOf(positions), iterations: 0 };
+}
+
+/**
+ * Deterministic Grid layout — nodes placed row-major on a near-square grid,
+ * ordered by descending degree then label so hubs cluster top-left and the
+ * arrangement is stable for the same DataView. Pure, no simulation.
+ */
+export function gridLayout(
+    model: GraphModel,
+    config: { nodeRadii?: number[] } = {},
+): LayoutResult {
+    const n = model.nodes.length;
+    const positions: Vec2[] = new Array(n);
+    if (n === 0) return { positions, bounds: boundsOf(positions), iterations: 0 };
+    const order = model.nodes.map((_, i) => i).sort((a, b) =>
+        (model.nodes[b].degree - model.nodes[a].degree)
+        || model.nodes[a].label.localeCompare(model.nodes[b].label) || (a - b));
+    const cols = Math.max(1, Math.ceil(Math.sqrt(n)));
+    const rows = Math.ceil(n / cols);
+    const maxR = config.nodeRadii && config.nodeRadii.length ? Math.max(12, ...config.nodeRadii) : 16;
+    const step = maxR * 2.8;
+    const offX = ((cols - 1) * step) / 2, offY = ((rows - 1) * step) / 2;
+    for (let slot = 0; slot < n; slot++) {
+        const node = order[slot];
+        const cx = slot % cols, cy = Math.floor(slot / cols);
+        positions[node] = { x: cx * step - offX, y: cy * step - offY };
+    }
+    return { positions, bounds: boundsOf(positions), iterations: 0 };
+}

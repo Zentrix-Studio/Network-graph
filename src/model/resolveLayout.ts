@@ -15,12 +15,12 @@
 import { GraphModel, LayoutResult, Vec2 } from "./graphTypes";
 import { seedPosition } from "./rng";
 import { computeForceLayout } from "./forceLayout";
-import { circularLayout } from "../render/layoutModes";
+import { circularLayout, ringLayout, gridLayout } from "../render/layoutModes";
 import { treeLayout, deriveTreeParents } from "./treeLayout";
 import { radialLayout } from "./radialLayout";
 import { geoLayout, hasGeoCoords, GeoCoord } from "./geoLayout";
 
-export type LayoutMode = "force" | "circle" | "radial" | "tree" | "geo";
+export type LayoutMode = "force" | "circle" | "ring" | "grid" | "radial" | "tree" | "geo";
 
 export interface ResolveLayoutInput {
     mode: LayoutMode;
@@ -129,6 +129,11 @@ export function resolveLayout(model: GraphModel, input: ResolveLayoutInput): Lay
             groups: input.ringGroups,
             nodeRadii: input.nodeRadii,
         });
+        case "ring": return ringLayout(model, {
+            groups: input.ringGroups,
+            nodeRadii: input.nodeRadii,
+        });
+        case "grid": return gridLayout(model, { nodeRadii: input.nodeRadii });
         case "geo":
             // Needs coordinates; without any, fall back to force so the mode isn't blank.
             if (input.geoCoords && hasGeoCoords(input.geoCoords)) return geoLayout(model, input.geoCoords);

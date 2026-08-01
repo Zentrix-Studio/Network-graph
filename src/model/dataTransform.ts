@@ -37,12 +37,76 @@ interface RoleIndex {
     tooltips: { index: number; name: string }[];
 }
 
-function roleIndices(dataView: DataView): RoleIndex {
-    const cols = dataView.table?.columns ?? [];
+/**
+ * DataView normalization (NG-228). The visual now uses a `categorical`
+ * dataViewMapping so Power BI delivers inbound cross-highlight (`supportsHighlight`);
+ * the jsdom harness and the test suite still build `table` DataViews. Both are
+ * flattened to the SAME row/column shape here so all downstream logic is unchanged,
+ * and the categorical path additionally captures the per-row highlight mask.
+ */
+interface NormalizedColumn { roles: Record<string, boolean> | undefined; displayName: string; }
+interface NormalizedTable {
+    columns: NormalizedColumn[];
+    rows: powerbi.PrimitiveValue[][];
+    /** Per-row inbound-highlight flag (true = highlighted / kept, false = dimmed).
+     *  All-true when no inbound highlight is active. */
+    highlights: boolean[];
+    /** True when a categorical highlights array is present (cross-highlight active). */
+    hasHighlight: boolean;
+}
+
+function fromTable(table: powerbi.DataViewTable): NormalizedTable {
+    const columns: NormalizedColumn[] = (table.columns ?? []).map((c) => ({
+        roles: c.roles as Record<string, boolean> | undefined,
+        displayName: c.displayName ?? "",
+    }));
+    const rows = (table.rows ?? []) as powerbi.PrimitiveValue[][];
+    return { columns, rows, highlights: rows.map(() => true), hasHighlight: false };
+}
+
+function fromCategorical(cat: powerbi.DataViewCategorical): NormalizedTable {
+    const cats = cat.categories ?? [];
+    const vals = cat.values ?? [];
+    const n = cats.length ? (cats[0].values?.length ?? 0)
+        : (vals.length ? (vals[0].values?.length ?? 0) : 0);
+    const columns: NormalizedColumn[] = [
+        ...cats.map((c) => ({ roles: c.source.roles as Record<string, boolean> | undefined, displayName: c.source.displayName ?? "" })),
+        ...vals.map((v) => ({ roles: v.source.roles as Record<string, boolean> | undefined, displayName: v.source.displayName ?? "" })),
+    ];
+    const rows: powerbi.PrimitiveValue[][] = [];
+    for (let i = 0; i < n; i++) {
+        const row: powerbi.PrimitiveValue[] = [];
+        for (const c of cats) row.push(c.values ? c.values[i] : null);
+        for (const v of vals) row.push(v.values ? v.values[i] : null);
+        rows.push(row);
+    }
+    // Inbound highlight: value columns carry a parallel `highlights` array when another
+    // visual cross-highlights this one. A row is in the highlighted set if ANY measure's
+    // highlight for that row is non-null (null = filtered out / dimmed).
+    const highlightCols = vals.filter((v) => v.highlights);
+    const hasHighlight = highlightCols.length > 0;
+    const highlights: boolean[] = [];
+    for (let i = 0; i < n; i++) {
+        highlights.push(hasHighlight ? highlightCols.some((v) => v.highlights![i] != null) : true);
+    }
+    return { columns, rows, highlights, hasHighlight };
+}
+
+/** Flatten either dataView mapping to the common normalized shape, or null if neither is present. */
+function normalize(dataView: DataView | undefined): NormalizedTable | null {
+    if (!dataView) return null;
+    const cat = dataView.categorical;
+    if (cat && ((cat.categories?.length ?? 0) || (cat.values?.length ?? 0))) return fromCategorical(cat);
+    if (dataView.table) return fromTable(dataView.table);
+    return null;
+}
+
+function roleIndices(nt: NormalizedTable): RoleIndex {
+    const cols = nt.columns;
     const find = (role: string) => cols.findIndex((c) => c.roles && c.roles[role]);
     const tooltips: { index: number; name: string }[] = [];
     cols.forEach((c, i) => {
-        if (c.roles && c.roles["tooltips"]) tooltips.push({ index: i, name: c.displayName ?? `Field ${i}` });
+        if (c.roles && c.roles["tooltips"]) tooltips.push({ index: i, name: c.displayName || `Field ${i}` });
     });
     return {
         source: find("source"),
@@ -74,8 +138,9 @@ export function asTime(v: unknown): number | null {
 
 /** True when both required roles (source, target) are bound. */
 export function hasRequiredRoles(dataView: DataView | undefined): boolean {
-    if (!dataView || !dataView.table) return false;
-    const r = roleIndices(dataView);
+    const nt = normalize(dataView);
+    if (!nt) return false;
+    const r = roleIndices(nt);
     return r.source >= 0 && r.target >= 0;
 }
 
@@ -84,8 +149,9 @@ export function hasRequiredRoles(dataView: DataView | undefined): boolean {
  * bound and the visual can render. Drives per-missing-role guidance.
  */
 export function missingRequiredRole(dataView: DataView | undefined): EmptyReason | null {
-    if (!dataView || !dataView.table || !(dataView.table.columns?.length)) return "noData";
-    const r = roleIndices(dataView);
+    const nt = normalize(dataView);
+    if (!nt || !nt.columns.length) return "noData";
+    const r = roleIndices(nt);
     if (r.source < 0) return "needSource";
     if (r.target < 0) return "needTarget";
     return null;
@@ -122,8 +188,9 @@ export function buildGraphData(
         mergeDuplicates?: boolean;
     },
 ): GraphData {
-    const r = roleIndices(dataView);
-    const rows = dataView.table?.rows ?? [];
+    const nt = normalize(dataView) ?? { columns: [], rows: [], highlights: [], hasHighlight: false };
+    const r = roleIndices(nt);
+    const rows = nt.rows;
 
     // Merge is ON unless explicitly disabled — mirrors the product default (settings.ts)
     // so direct callers and the live visual agree on the standard "one node per name" view.
@@ -161,6 +228,7 @@ export function buildGraphData(
 
     const edges: GraphEdge[] = [];
     const edgeRowIndex: number[] = []; // DataView row per edge (NG-076 edge selection)
+    const edgeHighlight: boolean[] = []; // per-edge inbound highlight flag (NG-228)
     const edgeTime: (number | null)[] = []; // per-edge time value (NG-077 temporal)
     // key → provisional attribute record, plus incident row indices.
     const attrByKey = new Map<string, NodeAttr>();
@@ -202,6 +270,7 @@ export function buildGraphData(
         const etype = r.edgeType >= 0 ? asText(row[r.edgeType]) : null;
         edges.push({ source: src, target: tgt, weight, type: etype });
         edgeRowIndex.push(i);
+        edgeHighlight.push(nt.highlights[i] ?? true);
         edgeTime.push(r.time >= 0 ? asTime(row[r.time]) : null);
         if (etype != null && !edgeTypeSeen.has(etype)) { edgeTypeSeen.add(etype); edgeTypes.push(etype); }
 
@@ -252,10 +321,15 @@ export function buildGraphData(
     for (const [key, order] of orderByKey) attrs[order] = attrByKey.get(key)!;
 
     const truncated = overBudget ? { shownRows: edges.length, totalRows: validEdges } : null;
+    // Inbound highlight is "active" only when the host actually differentiated rows
+    // (some kept, some dimmed) — an all-highlighted mask dims nothing.
+    const hasInboundHighlight = nt.hasHighlight && edgeHighlight.some((h) => !h);
 
     return {
         edges,
         attrs,
+        edgeHighlight: hasInboundHighlight ? edgeHighlight : undefined,
+        hasInboundHighlight,
         labelByKey: labelByKey.size ? labelByKey : undefined,
         hasWeight: r.weight >= 0,
         hasCategory: r.nodeCategory >= 0,
@@ -270,14 +344,14 @@ export function buildGraphData(
         edgeTime,
         hasTime: r.time >= 0 && edgeTime.some((t) => t != null),
         truncated,
-        roleNames: roleDisplayNames(dataView, r),
+        roleNames: roleDisplayNames(nt, r),
     };
 }
 
 /** Display name of each bound role's column (NG-111) — labels for native tooltips. */
-function roleDisplayNames(dataView: DataView, r: RoleIndex): RoleDisplayNames {
-    const cols = dataView.table?.columns ?? [];
-    const name = (i: number): string | null => (i >= 0 ? cols[i]?.displayName ?? null : null);
+function roleDisplayNames(nt: NormalizedTable, r: RoleIndex): RoleDisplayNames {
+    const cols = nt.columns;
+    const name = (i: number): string | null => (i >= 0 ? (cols[i]?.displayName || null) : null);
     return {
         source: name(r.source),
         target: name(r.target),

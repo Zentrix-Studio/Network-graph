@@ -295,6 +295,19 @@ export class Visual implements IVisual {
 
     /** Positions blob (key→[x,y]) for pinned mode — from metadata or optimistic. */
     private storedPositions: string | null = null;
+    /** Whether the author has explicitly persisted either node-radius endpoint (NG-239).
+     *  Value-independent: it is the *presence* of the persisted property, not its value,
+     *  that switches off automatic density/canvas down-scaling — so a deliberate Max of 40
+     *  (or Min of 4) is honoured exactly instead of being mistaken for the untouched default. */
+    private radiusAuthored = false;
+    /** Whether the author has explicitly persisted edge curvature (NG-242). When false, Tree
+     *  layout applies its smart maximum-curvature default; when true, the author's value wins
+     *  (including 0 for straight tree links). Same value-independent presence signal as above. */
+    private curveAuthored = false;
+    /** One-shot guard for the legacy "Bold labels" fold (NG-245). The accessibility bold
+     *  master was removed as redundant with the per-label Bold toggles; a report that saved
+     *  it ON is migrated into those toggles exactly once. */
+    private migratedLegacyBold = false;
     /** Visual-wide authoring history: settings, layout, rules, annotations, and
      *  persisted visual chrome. Session-local and bounded; transient exploration,
      *  selection, hover, zoom, and search are intentionally not authored state. */
@@ -371,13 +384,22 @@ export class Visual implements IVisual {
      *  while `colorPalette.isHighContrast`; drives every surface colour so the
      *  visual matches whichever HC theme the user picked (not a hard-coded pair). */
     private hcRoles: HCRoles | undefined;
+    /** Localization manager (NG-228). Resolves capabilities displayNameKeys and runtime
+     *  strings against the registered stringResources; undefined on hosts without it.
+     *  Passed to the FormattingSettingsService so the native pane localizes too. */
+    private localization?: powerbi.extensibility.ILocalizationManager;
 
     constructor(options: VisualConstructorOptions) {
         this.host = options.host;
         this.element = options.element;
         this.events = this.host.eventService;
         this.selectionManager = this.host.createSelectionManager();
-        this.formattingSettingsService = new FormattingSettingsService();
+        try {
+            this.localization = (this.host as unknown as {
+                createLocalizationManager?: () => powerbi.extensibility.ILocalizationManager;
+            }).createLocalizationManager?.();
+        } catch { this.localization = undefined; }
+        this.formattingSettingsService = new FormattingSettingsService(this.localization);
 
         this.tooltip = new GraphTooltip(options.element);
         try { this.tooltipService = (options.host as unknown as { tooltipService?: powerbi.extensibility.ITooltipService }).tooltipService || null; } catch { this.tooltipService = null; }
@@ -602,6 +624,7 @@ export class Visual implements IVisual {
             // leaves such a dropdown's value undefined, which would crash every `.value.value`
             // read. Reset any dropdown with an invalid/missing value to its first item.
             coerceDropdowns(this.formattingSettings);
+            this.migrateLegacyBoldLabels(dataView);
 
             const palette = this.host.colorPalette;
             const hc = !!palette.isHighContrast;
@@ -659,7 +682,8 @@ export class Visual implements IVisual {
             // has, so the graph appears immediately and densifies instead of freezing.
             const moreSegments = (dataView!.metadata as unknown as { segment?: unknown }).segment != null;
             if (moreSegments && this.formattingSettings.scale.fetchMore.value) {
-                const have = dataView!.table?.rows?.length ?? 0;
+                const have = dataView!.table?.rows?.length
+                    ?? dataView!.categorical?.categories?.[0]?.values?.length ?? 0;
                 const budget = this.maxEdgeBudget();
                 if (have < budget) {
                     try {
@@ -671,6 +695,13 @@ export class Visual implements IVisual {
 
             // Read persisted pinned positions (written by togglePin via persistProperties).
             this.storedPositions = readStoredPositions(dataView!);
+            // Whether either node-radius endpoint was ever persisted (NG-239). Combined with
+            // the settings bar's live pending edits so both a reloaded report and an in-flight
+            // gear drag count as "authored" and use the exact Min/Max instead of auto-scaling.
+            this.radiusAuthored = readObjectAuthored(dataView!, "nodes", ["minRadius", "maxRadius"]);
+            // Whether edge curvature was ever persisted (NG-242) — lets an explicit value
+            // override Tree's automatic max-curvature default, straight links included.
+            this.curveAuthored = readObjectAuthored(dataView!, "edges", ["curve"]);
             // Load persisted annotations (NG-074), with the optimistic-clobber guard: a
             // stale interleaved update() must not revert a just-written note before its
             // persistProperties echoes back.
@@ -839,6 +870,32 @@ export class Visual implements IVisual {
             this.events.renderingFailed(options, String(e));
             this.renderFatal(options.viewport.width, options.viewport.height);
         }
+    }
+
+    /** Legacy fold for the removed accessibility "Bold labels" master (NG-245). That toggle
+     *  was redundant with the per-label Outer/Inner Bold controls (it merely OR'd into both),
+     *  so it was deleted. A report that persisted it ON is migrated ONCE into the per-label
+     *  toggles — bold preserved and now fully controllable. Cross-load idempotence comes from
+     *  the *presence* of a persisted `labels.bold`: once migration (or any explicit outer-bold
+     *  edit) has written it, we never fold again, so bold is never re-forced stuck-on. No write
+     *  to the now-undeclared `accessibility` object is needed (a strict host could drop it). */
+    private migrateLegacyBoldLabels(dataView: DataView | undefined): void {
+        if (this.migratedLegacyBold || !dataView) return;
+        const objs = dataView.metadata?.objects as Record<string, powerbi.DataViewObject> | undefined;
+        const legacy = (objs?.accessibility as { boldLabels?: unknown } | undefined)?.boldLabels;
+        if (legacy !== true) return; // nothing saved → the per-label toggles already own bold
+        // Already migrated, or the author has explicitly set outer bold → they own it now.
+        if ((objs?.labels as { bold?: unknown } | undefined)?.bold !== undefined) {
+            this.migratedLegacyBold = true;
+            return;
+        }
+        this.migratedLegacyBold = true;
+        // Optimistic: reflect it in this frame so the migration causes no bold flicker.
+        this.formattingSettings.labels.bold.value = true;
+        this.formattingSettings.labels.innerBold.value = true;
+        this.host.persistProperties({
+            merge: [{ objectName: "labels", selector: null, properties: { bold: true, innerBold: true } }],
+        } as powerbi.VisualObjectInstancesToPersist);
     }
 
     /** The surface palette for a theme, with the host's live HC roles applied. */
@@ -1036,6 +1093,28 @@ export class Visual implements IVisual {
         }
         this.removeSummary();
         this.svg.style("display", null);
+
+        // Filtered-to-empty guard (86d3wdnbk / NG-233): both required roles are bound —
+        // so update() passed the missingRequiredRole gate — but a slicer/visual-level
+        // filter has left zero rows, so the model has no nodes. Without this the Graph
+        // tab paints a blank white canvas with no explanation, while the Table tab (which
+        // computes "Nodes: 0") correctly reads as empty. Surface the same empty state on
+        // the default Graph view so a user landing here doesn't read it as frozen/broken.
+        // The view pill is already placed above, so Table/Insight stay reachable.
+        if (st.model.nodes.length === 0) {
+            this.graphPainted = false;
+            this.canvasActive = false;
+            this.clearCanvas();
+            this.clearLayers();
+            this.detailPanel.hide();
+            this.openNode = null;
+            this.actionBar.hide();
+            this.enterprisePanel.setChromeHidden(true);
+            this.rulesPanel.hide();
+            this.restoreBtn.style.display = "none";
+            this.renderEmptyState("noRows", st.width, st.height, surface);
+            return;
+        }
 
         // Focus mode (NG-118): hide every persistent chrome element (gear, panels,
         // temporal, view pill) so only the graph shows; the restore button is the one
@@ -1248,9 +1327,12 @@ export class Visual implements IVisual {
                     && hierarchyParents[link.target] !== source;
             }
             : undefined;
-        // Tree always uses the strongest bow. Keep the author's general curvature
-        // value untouched so switching to another layout restores their preference.
-        const effectiveEdgeCurve = mode === "tree" ? 100 : (s.edges.curve.value || 0);
+        // Tree DEFAULTS to the strongest bow so parent/child relationships fan apart, but
+        // the author keeps full control (NG-242): an explicitly set curvature wins, 0 (straight
+        // links) included. Only an untouched curvature falls back to Tree's automatic maximum.
+        const curveAuthored = this.curveAuthored || this.toolbar.hasPendingEdit("edges.curve");
+        const authoredCurve = s.edges.curve.value || 0;
+        const effectiveEdgeCurve = mode === "tree" && !curveAuthored ? 100 : authoredCurve;
 
         const renderOpts: GraphRenderOptions = {
             width: st.width, height: st.height,
@@ -1278,6 +1360,7 @@ export class Visual implements IVisual {
             edgeSecondaryOf,
             edgeLabelOf: this.makeEdgeLabel(st),
             edgeThickness: s.edges.thickness.value || 1,
+            edgeScaleByWeight: s.edges.scaleByWeight.value,
             edgeCurve: effectiveEdgeCurve,
             nodeStroke: surface.bg,
             // Label colour honours the setting; blank/high-contrast → theme foreground.
@@ -1287,7 +1370,7 @@ export class Visual implements IVisual {
             showLabels,
             maxLabels: Math.max(0, s.labels.maxLabels.value || 0),
             // Bold from the label style OR the a11y toggle (either forces bold).
-            labelBold: s.labels.bold.value || s.accessibility.boldLabels.value,
+            labelBold: s.labels.bold.value,
             labelSize: s.labels.fontSize.value || 11,
             labelItalic: s.labels.italic.value,
             labelUnderline: s.labels.underline.value,
@@ -1322,7 +1405,7 @@ export class Visual implements IVisual {
                 // Canvas has no per-edge DOM, so gradient falls back to the source-side
                 // colour (edgeColors.colorOf) — batches cheaply, reads the same at scale.
                 edgeColor: edgeColors.representative, edgeColorOf: edgeColors.colorOf,
-                edgeWidthOf: makeEdgeWidth(st.model, s.edges.thickness.value || 1),
+                edgeWidthOf: makeEdgeWidth(st.model, s.edges.thickness.value || 1, s.edges.scaleByWeight.value),
                 edgeCurve: effectiveEdgeCurve,
                 edgeSuppressedOf: twoWay?.edgeSuppressedOf,
                 edgeSecondaryOf,
@@ -1411,11 +1494,21 @@ export class Visual implements IVisual {
         if (!this.canvasActive && s.nodes.showValue.value) {
             const configuredInnerColor = s.labels.innerColor.value.value as string;
             const innerColor = st.hc ? surface.fg : configuredInnerColor;
+            const nodeShape = s.nodes.shape.value.value as NodeShape;
+            // Donut nodes carry the value over their open centre, where the canvas — not the
+            // node fill — shows through. Contrast against the *canvas* (surface.fg, dark on a
+            // light theme) instead of the fill, or white contrast-text vanishes in the hole
+            // (NG-242, replacing the reverted inner-label background).
+            const donut = nodeShape === "donut";
             drawNodeValues(this.valueGroup, st.model, geo.px, {
                 valueOf: (i) => this.nodeValueOf(st, i),
                 radiusOf,
-                textColorOf: (i) => innerColor || (isDarkColor(colorOf(i)) ? "#FFFFFF" : surface.fg),
+                shape: nodeShape,
+                textColorOf: (i) => innerColor || (donut ? surface.fg : (isDarkColor(colorOf(i)) ? "#FFFFFF" : surface.fg)),
                 outsideColor: innerColor || surface.fg,
+                // With outer labels on, a value that can't fit inside a small node is hidden
+                // rather than pushed below it — the outer label already names it (NG-240).
+                outerLabelsShown: s.labels.show.value,
                 decimals: Math.max(0, s.nodes.valueDecimals.value || 0),
                 displayUnits: s.labels.innerValueFormat.value.value as ValueDisplayUnits,
                 font: (s.labels.innerFontFamily.value.value as string) || fontFamily,
@@ -1456,11 +1549,31 @@ export class Visual implements IVisual {
         } else {
             this.hullGroup.selectAll("*").remove();
         }
-        // Cluster captions (E2) — one label per cluster, above its node cloud.
+        // Cluster captions (E2) — one label per cluster, lifted above its node cloud so it
+        // clears the topmost node (NG-246), with author-controlled typography.
         if (clusterVisible && cl.showLabels.value) {
+            const configuredLabelColor = cl.labelColor.value.value as string;
+            const autoColor = (cl.labelColorMode.value.value as string) !== "manual";
+            // Auto (NG-247): each caption takes its cluster's own colour — the SAME colour the
+            // hull uses (single tint, else the per-cluster palette entry) — so a label maps to
+            // its region at a glance. Manual uses the picked colour. HC always wins.
+            const pal = paletteByName(s.colors.palette.value.value as string);
+            const singleTint = cl.colorSource.value.value === "single" ? (cl.tint.value.value || null) : null;
+            const colorOf = st.hc
+                ? () => surface.fg
+                : autoColor
+                    ? (c: number) => singleTint || pal[c % pal.length]
+                    : () => configuredLabelColor || surface.fg;
             renderClusterLabels(this.clusterLabelGroup, geo.px, st.community!,
                 (c) => this.clusterLabel(st, c, cl.showSizes.value),
-                { font: fontFamily, color: surface.fg, fontSize: 12 });
+                {
+                    font: (cl.labelFont.value.value as string) || fontFamily,
+                    colorOf,
+                    fontSize: Math.max(8, cl.labelSize.value || 12),
+                    bold: cl.labelBold.value,
+                    italic: cl.labelItalic.value,
+                },
+                radiusOf);
         } else {
             this.clusterLabelGroup.selectAll("*").remove();
         }
@@ -2595,10 +2708,12 @@ export class Visual implements IVisual {
             // Edge-weight section (NG-082) — only when weights actually vary. Its line
             // samples take the current link colour (single mode) instead of fixed grey,
             // and drop the accent-max override so the whole scale reads in that colour.
-            if (showEdgeLegend && links.length) {
+            // Only when width actually encodes weight (86d3wdnav) — a weight→width scale
+            // legend is meaningless when Scale width by weight is off (all links uniform).
+            if (showEdgeLegend && links.length && s.edges.scaleByWeight.value) {
                 let minW = Infinity, maxW = -Infinity;
                 for (const l of links) { if (l.weight < minW) minW = l.weight; if (l.weight > maxW) maxW = l.weight; }
-                const widthAt = makeEdgeWidth(st.model, s.edges.thickness.value || 1);
+                const widthAt = makeEdgeWidth(st.model, s.edges.thickness.value || 1, s.edges.scaleByWeight.value);
                 const lineCol = edgeMode === "single" ? ((s.edges.color.value.value as string) || surface.edge) : surface.edge;
                 const ew = edgeWeightSection(minW, maxW, (w) => widthAt(-1, w), lineCol);
                 if (ew) { if (edgeMode !== "auto") (ew as { plain?: boolean }).plain = true; sections.push(ew); }
@@ -2917,10 +3032,15 @@ export class Visual implements IVisual {
         const s = this.formattingSettings;
         const configuredMin = Math.max(1, s.nodes.minRadius.value || 4);
         const configuredMax = Math.max(configuredMin, s.nodes.maxRadius.value || 40);
-        // Automatic density/canvas sizing belongs only to the untouched default
-        // 4–40 range. As soon as the author changes either endpoint, both values
-        // become an explicit range and are rendered exactly as entered.
-        const autoRange = configuredMin === 4 && configuredMax === 40;
+        // Automatic density/canvas sizing belongs only to the untouched default range.
+        // As soon as the author touches either endpoint, both values become an explicit
+        // range and are rendered exactly as entered. "Touched" is a value-independent
+        // signal (NG-239): a persisted endpoint (reloaded report) OR a live gear edit not
+        // yet round-tripped through persistProperties. Comparing against the default 4/40
+        // was the bug — a deliberate Max of exactly 40 read as "untouched" and silently
+        // shrank every node, while 39 and 41 rendered full size.
+        const authored = this.radiusAuthored || this.toolbar.hasPendingEdit("nodes.minR", "nodes.maxR");
+        const autoRange = !authored;
         const responsiveScale = autoRange
             ? responsiveNodeRadiusScale(st.width, st.height) * nodeCountRadiusScale(visibleNodeCount)
             : 1;
@@ -3025,11 +3145,20 @@ export class Visual implements IVisual {
         const available = (value: string): boolean =>
             (value === "weight" || value === "weightPct") ? st.data.hasWeight
                 : value === "type" ? st.data.hasEdgeType
-                    : value === "betweenness" ? st.model.nodes.length <= 2000 : false;
+                    : value === "betweenness" ? st.model.nodes.length <= 2000
+                        : value === "names" ? true // every edge has a source and target
+                            : false;
         if (!available(src)) {
-            src = ["weight", "type", "weightPct", "betweenness"].find(available) ?? "";
+            src = ["weight", "type", "weightPct", "betweenness", "names"].find(available) ?? "";
         }
         if (!src) return undefined;
+        if (src === "names") {
+            // Source → target node names (N13). Always available — no numeric data needed.
+            return (li) => {
+                const l = st.model.links[li];
+                return `${st.model.nodes[l.source].label} → ${st.model.nodes[l.target].label}`;
+            };
+        }
         if (src === "weightPct") {
             // Share of total weight (N13). One pass; stable denominator.
             const total = st.model.links.reduce((a, l) => a + (Number.isFinite(l.weight) ? l.weight : 1), 0);
@@ -3381,8 +3510,23 @@ export class Visual implements IVisual {
             const ids = st.idsByNode[i];
             return !!ids && ids.some((id) => selected.some((sid) => idEquals(sid, id)));
         };
+        // Inbound cross-highlight (NG-228): another visual filtered THIS graph in
+        // Highlight mode, so the categorical DataView carries a per-edge highlight mask.
+        // Dim everything outside the highlighted set, combined with any local selection
+        // (a node must satisfy BOTH predicates to stay fully lit).
+        const hl = st.data.edgeHighlight;
+        const hlActive = st.data.hasInboundHighlight === true && !!hl;
+        const hlNodes = new Set<number>();
+        if (hlActive) {
+            for (let li = 0; li < st.model.links.length; li++) {
+                if (hl![li]) { hlNodes.add(st.model.links[li].source); hlNodes.add(st.model.links[li].target); }
+            }
+        }
+        const anyDim = anySelected || hlActive;
+        const isKeptNode = (i: number): boolean =>
+            (!anySelected || isSelectedNode(i)) && (!hlActive || hlNodes.has(i));
         const surface = this.surfaceFor(st.dark, st.hc);
-        applySelectionDim(this.nodeGroup, this.edgeGroup, anySelected, isSelectedNode,
+        applySelectionDim(this.nodeGroup, this.edgeGroup, anyDim, isKeptNode,
             (li) => [st.model.links[li].source, st.model.links[li].target],
             st.hc ? (surface.selected || surface.fg) : undefined);
         // Ranking highlight is a persistent view state, not a transient hover. Reapply
@@ -3732,11 +3876,28 @@ export class Visual implements IVisual {
     }
 
     private buildSelectionIds(dataView: DataView, model: GraphModel, data: GraphData): { idsByNode: ISelectionId[][]; idsByEdge: ISelectionId[] } {
-        const table = dataView.table!;
         // One selection id per edge row, reused across the nodes it touches AND as the
         // per-edge id (NG-076). rowIds may be missing for a row the transform dropped.
-        const rowIds: ISelectionId[] = table.rows.map((_, ri) =>
-            this.host.createSelectionIdBuilder().withTable(table, ri).createSelectionId());
+        // Dual-path (NG-228): `table` mapping → withTable(rowIndex); `categorical`
+        // mapping (production, delivers highlights) → withCategory on the source/target
+        // category scope for that row.
+        let rowIds: ISelectionId[];
+        const table = dataView.table;
+        const cats = dataView.categorical?.categories;
+        if (table) {
+            rowIds = table.rows.map((_, ri) =>
+                this.host.createSelectionIdBuilder().withTable(table, ri).createSelectionId());
+        } else if (cats && cats.length) {
+            const n = cats[0].values?.length ?? 0;
+            rowIds = [];
+            for (let ri = 0; ri < n; ri++) {
+                let b = this.host.createSelectionIdBuilder();
+                for (const c of cats) b = b.withCategory(c, ri);
+                rowIds.push(b.createSelectionId());
+            }
+        } else {
+            rowIds = [];
+        }
         const idsByNode = model.nodes.map((_, i) => (data.attrs[i]?.rowIndices ?? []).map((ri) => rowIds[ri]));
         const idsByEdge = data.edgeRowIndex.map((ri) => rowIds[ri]);
         return { idsByNode, idsByEdge };
@@ -3917,6 +4078,10 @@ export class Visual implements IVisual {
                 title: "Add a Target node field to render the network",
                 detail: "Target data defines where each relationship ends",
             },
+            noRows: {
+                title: "No nodes match the current filters",
+                detail: "Adjust the slicers or filters on this report to bring relationships back into view",
+            },
         };
         const message = copy[reason];
         this.overlayGroup.append("text")
@@ -3979,6 +4144,19 @@ function readStoredRules(dataView: DataView): string | null {
     const v = cf && (cf as powerbi.DataViewObject).rules;
     if (v == null) return null;
     return typeof v === "string" ? v : String(v);
+}
+
+/** Whether the author has explicitly persisted any of `props` on `object` (NG-239/NG-242).
+ *  The signal is the *presence* of the property in the persisted object, never its value —
+ *  persistProperties writes the key on any edit, so a deliberate value that happens to equal
+ *  the default (radius Max 40, curvature 0) is indistinguishable from untouched by value
+ *  alone. Presence is not. Used to let an explicit author value override a mode's smart
+ *  default (e.g. Tree's automatic max curvature) without the "typed the default" trap. */
+function readObjectAuthored(dataView: DataView, object: string, props: readonly string[]): boolean {
+    const objs = dataView.metadata && dataView.metadata.objects;
+    const obj = objs && (objs as Record<string, powerbi.DataViewObject>)[object];
+    if (!obj) return false;
+    return props.some((p) => (obj as powerbi.DataViewObject)[p] !== undefined);
 }
 
 /** Read the persisted legend-fold flag from DataView metadata (NG-142). Absent = open. */

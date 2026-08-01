@@ -10,78 +10,91 @@
             "displayName": "Source node",
             "description": "Required. The 'from' end of each relationship — a category column of node identifiers. One row = one edge.",
             "name": "source",
+            "displayNameKey": "Role_Source",
             "kind": "Grouping"
         },
         {
             "displayName": "Target node",
             "description": "Required. The 'to' end of each relationship. Self-loops (source = target) and parallel edges are supported.",
             "name": "target",
+            "displayNameKey": "Role_Target",
             "kind": "Grouping"
         },
         {
             "displayName": "Edge weight",
             "description": "Optional. A numeric measure per edge; drives edge thickness. Defaults to 1 when unbound.",
             "name": "weight",
+            "displayNameKey": "Role_Weight",
             "kind": "Measure"
         },
         {
             "displayName": "Node category",
             "description": "Optional. A category for the source node of each row; drives node colour (and, later, clustering). Target-only nodes use a neutral colour.",
             "name": "nodeCategory",
+            "displayNameKey": "Role_NodeCategory",
             "kind": "Grouping"
         },
         {
             "displayName": "Node size",
             "description": "Optional. A numeric measure for the source node; drives Node value. When unbound, Node value uses the total connected Edge weight (or degree for unweighted data).",
             "name": "nodeSize",
+            "displayNameKey": "Role_NodeSize",
             "kind": "Measure"
         },
         {
             "displayName": "Node parent",
             "description": "Optional. A parent-node key. When bound, unlocks org-chart / tree layout (Enterprise).",
             "name": "nodeParent",
+            "displayNameKey": "Role_NodeParent",
             "kind": "Grouping"
         },
         {
             "displayName": "Latitude",
             "description": "Optional. Source node's latitude. With Longitude, unlocks Geo-route layout (nodes placed on their geography — flights, rail, supply chain). No map tiles are fetched.",
             "name": "latitude",
+            "displayNameKey": "Role_Latitude",
             "kind": "Measure"
         },
         {
             "displayName": "Longitude",
             "description": "Optional. Source node's longitude. Pair with Latitude to enable Geo-route layout.",
             "name": "longitude",
+            "displayNameKey": "Role_Longitude",
             "kind": "Measure"
         },
         {
             "displayName": "Edge type",
             "description": "Optional. A category per relationship (e.g. flight / rail / ferry). Drives edge colour + line style, with a legend — the 'typed edges' link-analysis pattern.",
             "name": "edgeType",
+            "displayNameKey": "Role_EdgeType",
             "kind": "Grouping"
         },
         {
             "displayName": "Time",
             "description": "Optional. A date or numeric value per edge for the temporal play axis (edges appear over time).",
             "name": "time",
+            "displayNameKey": "Role_Time",
             "kind": "Grouping"
         },
         {
             "displayName": "Node image",
             "description": "Optional. A per-node image as a base64 data: URI (e.g. data:image/png;base64,...). Renders in place of the node marker. Only data: URIs render (external URLs are ignored to keep the visual certified); base64-encode images in Power Query.",
             "name": "nodeImage",
+            "displayNameKey": "Role_NodeImage",
             "kind": "Grouping"
         },
         {
             "displayName": "Node icon",
             "description": "Optional. A semantic entity name per node (e.g. Person, Company, Server, Database) shown as a monochrome vector in place of the node shape and pattern. Legacy unicode glyphs remain supported. Cert-safe (no external assets); a bound image takes priority.",
             "name": "nodeIcon",
+            "displayNameKey": "Role_NodeIcon",
             "kind": "Grouping"
         },
         {
             "displayName": "Tooltips",
             "description": "Optional. Business fields shown in node hover cards and click-through details. These can replace or supplement network metrics.",
             "name": "tooltips",
+            "displayNameKey": "Role_Tooltips",
             "kind": "GroupingOrMeasure"
         }
     ],
@@ -124,80 +137,32 @@
                     }
                 }
             ],
-            "table": {
-                "rows": {
+            "categorical": {
+                "categories": {
                     "select": [
-                        {
-                            "for": {
-                                "in": "source"
-                            }
-                        },
-                        {
-                            "for": {
-                                "in": "target"
-                            }
-                        },
-                        {
-                            "for": {
-                                "in": "weight"
-                            }
-                        },
-                        {
-                            "for": {
-                                "in": "nodeCategory"
-                            }
-                        },
-                        {
-                            "for": {
-                                "in": "nodeSize"
-                            }
-                        },
-                        {
-                            "for": {
-                                "in": "nodeParent"
-                            }
-                        },
-                        {
-                            "for": {
-                                "in": "latitude"
-                            }
-                        },
-                        {
-                            "for": {
-                                "in": "longitude"
-                            }
-                        },
-                        {
-                            "for": {
-                                "in": "edgeType"
-                            }
-                        },
-                        {
-                            "for": {
-                                "in": "nodeImage"
-                            }
-                        },
-                        {
-                            "for": {
-                                "in": "nodeIcon"
-                            }
-                        },
-                        {
-                            "for": {
-                                "in": "tooltips"
-                            }
-                        },
-                        {
-                            "for": {
-                                "in": "time"
-                            }
-                        }
+                        { "for": { "in": "source" } },
+                        { "for": { "in": "target" } },
+                        { "for": { "in": "nodeCategory" } },
+                        { "for": { "in": "nodeParent" } },
+                        { "for": { "in": "edgeType" } },
+                        { "for": { "in": "time" } },
+                        { "for": { "in": "nodeImage" } },
+                        { "for": { "in": "nodeIcon" } }
                     ],
                     "dataReductionAlgorithm": {
                         "window": {
                             "count": 30000
                         }
                     }
+                },
+                "values": {
+                    "select": [
+                        { "for": { "in": "weight" } },
+                        { "for": { "in": "nodeSize" } },
+                        { "for": { "in": "latitude" } },
+                        { "for": { "in": "longitude" } },
+                        { "for": { "in": "tooltips" } }
+                    ]
                 }
             }
         }
@@ -223,6 +188,14 @@
                             {
                                 "value": "geo",
                                 "displayName": "Geo-route (lat/long)"
+                            },
+                            {
+                                "value": "ring",
+                                "displayName": "Circular"
+                            },
+                            {
+                                "value": "grid",
+                                "displayName": "Grid"
                             }
                         ]
                     }
@@ -963,6 +936,11 @@
                         "numeric": true
                     }
                 },
+                "scaleByWeight": {
+                    "type": {
+                        "bool": true
+                    }
+                },
                 "flow": {
                     "type": {
                         "bool": true
@@ -1001,6 +979,10 @@
                             {
                                 "value": "betweenness",
                                 "displayName": "Edge betweenness"
+                            },
+                            {
+                                "value": "names",
+                                "displayName": "Source → target"
                             }
                         ]
                     }
@@ -1501,6 +1483,49 @@
                         "bool": true
                     }
                 },
+                "labelFont": {
+                    "type": {
+                        "text": true
+                    }
+                },
+                "labelSize": {
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "labelBold": {
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "labelItalic": {
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "labelColorMode": {
+                    "type": {
+                        "enumeration": [
+                            {
+                                "value": "auto",
+                                "displayName": "Auto (match cluster)"
+                            },
+                            {
+                                "value": "manual",
+                                "displayName": "Manual"
+                            }
+                        ]
+                    }
+                },
+                "labelColor": {
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
                 "groupByCluster": {
                     "type": {
                         "bool": true
@@ -1707,15 +1732,6 @@
                                 "displayName": "Top-right"
                             }
                         ]
-                    }
-                }
-            }
-        },
-        "accessibility": {
-            "properties": {
-                "boldLabels": {
-                    "type": {
-                        "bool": true
                     }
                 }
             }

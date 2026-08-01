@@ -583,10 +583,10 @@ const PAGES: PageDefinition[] = [
     },
     {
         eyebrow: "MVP 2 · Layout modes",
-        title: "Four layouts. One interaction model.",
+        title: "Six layouts. One interaction model.",
         scene: sceneLayoutGallery,
         lines: [
-            "• Force reveals communities; Concentric separates core from periphery; Hierarchy follows parent paths.",
+            "• Force reveals communities; Concentric separates core from periphery; Circular and Grid give tidy, stable arrangements; Hierarchy follows parent paths.",
             "• Geo mode places nodes from Latitude and Longitude on a bundled world outline.",
             "• Routes, typed edges, selection, tooltips, and labels behave consistently in every mode.",
             "Switch the structure without rebuilding the report.",
