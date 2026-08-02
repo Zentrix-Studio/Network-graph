@@ -27,6 +27,16 @@ export function hasGeoCoords(coords: (GeoCoord | null)[]): boolean {
     return coords.some((c) => c != null);
 }
 
+/**
+ * Full equirectangular world extent, in the layout's projected space (x = lon,
+ * y = -lat). Geo mode always frames THIS, never the data's bounding box, so the
+ * world basemap stays fully intact at a fixed scale whether there are 3 nodes or
+ * 3,000 — no zoom-to-fit (geo layout only). Must match the graticule range in
+ * render/worldOutline.ts (LON_MIN/MAX = ±180, LAT_MIN/MAX = -60..80; y = -lat).
+ */
+const WORLD_MIN_X = -180, WORLD_MAX_X = 180;   // longitude
+const WORLD_MIN_Y = -80, WORLD_MAX_Y = 60;     // y = -latitude, for lat 80..-60
+
 export function geoLayout(model: GraphModel, coords: (GeoCoord | null)[]): LayoutResult {
     // Centroid of the known coordinates → fallback for un-geocoded nodes.
     let sx = 0, sy = 0, k = 0;
@@ -39,17 +49,17 @@ export function geoLayout(model: GraphModel, coords: (GeoCoord | null)[]): Layou
 
     const positions: Vec2[] = model.nodes.map((_, i) => (coords[i] ? project(coords[i]!) : { x: cx, y: cy }));
 
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    // Start from the full world extent and only ever grow it, so the fit always
+    // shows the whole map. A node outside the map band (lat >80 / <-60) still
+    // stays on-screen because the bounds expand to include it, but the common
+    // case leaves the extent exactly at the full world — no zoom in on sparse data.
+    let minX = WORLD_MIN_X, minY = WORLD_MIN_Y, maxX = WORLD_MAX_X, maxY = WORLD_MAX_Y;
     for (const p of positions) {
         if (p.x < minX) minX = p.x;
         if (p.y < minY) minY = p.y;
         if (p.x > maxX) maxX = p.x;
         if (p.y > maxY) maxY = p.y;
     }
-    if (!Number.isFinite(minX)) { minX = minY = 0; maxX = maxY = 0; }
-    // Guard a zero-extent (all nodes at one point) so fitTransform doesn't divide by ~0.
-    if (maxX - minX < 1e-6) { minX -= 1; maxX += 1; }
-    if (maxY - minY < 1e-6) { minY -= 1; maxY += 1; }
 
     return { positions, bounds: { minX, minY, maxX, maxY }, iterations: 0 };
 }

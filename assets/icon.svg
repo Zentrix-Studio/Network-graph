@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 300" width="300" height="300">
+  <defs>
+    <radialGradient id="hub" cx="42%" cy="38%" r="72%">
+      <stop offset="0%" stop-color="#6A4BE0"/>
+      <stop offset="100%" stop-color="#4A2FB8"/>
+    </radialGradient>
+  </defs>
+
+  <!-- edges (drawn under the nodes) — dark grey for contrast on a light pane -->
+  <g stroke="#4B5163" stroke-width="7" stroke-linecap="round" fill="none">
+    <line x1="150" y1="150" x2="105" y2="81"/>
+    <line x1="150" y1="150" x2="198" y2="76"/>
+    <line x1="150" y1="150" x2="228" y2="150"/>
+    <line x1="150" y1="150" x2="190" y2="216"/>
+    <line x1="150" y1="150" x2="112" y2="218"/>
+    <line x1="150" y1="150" x2="72" y2="152"/>
+    <line x1="72" y1="152" x2="105" y2="81"/>
+    <line x1="228" y1="150" x2="190" y2="216"/>
+  </g>
+
+  <!-- satellite nodes — deep, saturated tones so they pop at 20px -->
+  <g>
+    <circle cx="105" cy="81"  r="26" fill="#0E9C7A"/>
+    <circle cx="198" cy="76"  r="24" fill="#C99400"/>
+    <circle cx="228" cy="150" r="24" fill="#DA5A1E"/>
+    <circle cx="190" cy="216" r="26" fill="#C42E73"/>
+    <circle cx="112" cy="218" r="22" fill="#2E9E4B"/>
+    <circle cx="72"  cy="152" r="24" fill="#2C6BC7"/>
+  </g>
+
+  <!-- central hub -->
+  <circle cx="150" cy="150" r="39" fill="url(#hub)"/>
+</svg>

@@ -4256,6 +4256,12 @@ export class Visual implements IVisual {
     }
 
     private clearLayers(): void {
+        // The geo basemap and node annotations live in their own zoom-group layers and
+        // are re-drawn later on the success render path (basemap after the fit; notes with
+        // the node positions). They MUST be cleared here too, or an empty/fatal state — e.g.
+        // removing the Source or Target field after a geo render — leaves the world map (or
+        // orphaned notes) sitting behind the empty-state message.
+        this.basemapGroup.selectAll("*").remove();
         this.hullGroup.selectAll("*").remove();
         this.edgeGroup.selectAll("*").remove();
         this.nodeGroup.selectAll("*").remove();
@@ -4264,6 +4270,7 @@ export class Visual implements IVisual {
         this.labelGroup.selectAll("*").remove();
         this.foldIndicatorGroup.selectAll("*").remove();
         this.clusterLabelGroup.selectAll("*").remove();
+        this.notesGroup.selectAll("*").remove();
         this.overlayGroup.selectAll("*").remove();
     }
 

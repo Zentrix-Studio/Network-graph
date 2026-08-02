@@ -746,7 +746,7 @@ export class LandingPage {
 
         const content = el("div", "zx-lp-content");
         const brand = el("div", "zx-lp-brand");
-        brand.appendChild(brandGlyph());
+        brand.appendChild(brandGlyph(context.dark));
         brand.appendChild(textEl("span", "zx-lp-brandname", "ZENTRIX"));
         brand.appendChild(textEl("span", "zx-lp-ver", "v" + VERSION));
         content.appendChild(brand);
@@ -869,18 +869,27 @@ function actionButton(
     return element;
 }
 
-/** Network-node brand mark used in place of the heatmap's cell glyph. */
-function brandGlyph(): SVGSVGElement {
+/** Zentrix Network Graph brand mark — the hub-and-satellites logo, matched to the
+ *  visual icon (assets/icon.svg) and the 300×300 store logo. Multi-colour; the hub
+ *  tint adapts to the theme so it reads on both the light and dark landing cards. */
+function brandGlyph(dark: boolean): SVGSVGElement {
     const svg = svgNode("0 0 24 24", 18, 18);
-    svg.setAttribute("fill", "currentColor");
-    svg.appendChild(lineNode(6, 7, 17, 5, "currentColor", 1.7));
-    svg.appendChild(lineNode(6, 7, 12, 18, "currentColor", 1.7));
-    svg.appendChild(lineNode(17, 5, 19, 16, "currentColor", 1.7));
-    svg.appendChild(lineNode(12, 18, 19, 16, "currentColor", 1.7));
-    svg.appendChild(circleNode(6, 7, 3, "currentColor"));
-    svg.appendChild(circleNode(17, 5, 2.5, "currentColor"));
-    svg.appendChild(circleNode(12, 18, 3, "currentColor"));
-    svg.appendChild(circleNode(19, 16, 2.5, "currentColor"));
+    // [x, y, r, colour] — six satellites around a central hub (logo geometry, /12.5 scale)
+    const sat: Array<[number, number, number, string]> = [
+        [8.4, 6.5, 2.1, "#48C9A3"],   // teal
+        [15.8, 6.1, 1.95, "#F2CB4E"], // gold
+        [18.2, 12, 1.95, "#F0925C"],  // orange
+        [15.2, 17.3, 2.1, "#D95B93"], // magenta
+        [9.0, 17.4, 1.8, "#5FB86A"],  // green
+        [5.8, 12.2, 1.95, "#5B9BE5"], // blue
+    ];
+    const edge = dark ? "#6E7488" : "#9AA0B4";
+    sat.forEach(([x, y]) => svg.appendChild(lineNode(12, 12, x, y, edge, 1.3)));
+    // perimeter links (blue→teal, orange→magenta) matching the logo
+    svg.appendChild(lineNode(5.8, 12.2, 8.4, 6.5, edge, 1.3));
+    svg.appendChild(lineNode(18.2, 12, 15.2, 17.3, edge, 1.3));
+    sat.forEach(([x, y, r, color]) => svg.appendChild(circleNode(x, y, r, color)));
+    svg.appendChild(circleNode(12, 12, 3.1, dark ? "#8B6EF7" : "#6A4BE0"));
     return svg;
 }
 
