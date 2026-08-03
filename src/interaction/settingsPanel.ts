@@ -84,11 +84,17 @@ export class SettingsOverlay {
         private onHistoryCommit?: () => void,
     ) {
         this.root = root;
-        const persist = (object: string, prop: string, value: powerbi.DataViewPropertyValue) =>
-            this.host.persistProperties({ merge: [{ objectName: object, selector: null, properties: { [prop]: value } }] } as powerbi.VisualObjectInstancesToPersist);
+        // ONE persistProperties call per edit, even when an engine key backs several real
+        // properties (e.g. nodes.clickMode's mutually-exclusive selection writes 3 booleans) —
+        // separate back-to-back calls risk a host that doesn't queue/merge them dropping all
+        // but the last (NG-QA-002: a composite setting silently desyncing from its own booleans).
+        const batchPersist = (merge: { objectName: string; properties: Record<string, powerbi.DataViewPropertyValue> }[]) =>
+            this.host.persistProperties({
+                merge: merge.map(({ objectName, properties }) => ({ objectName, selector: null, properties })),
+            } as powerbi.VisualObjectInstancesToPersist);
         // On every edit: record it as pending (so the next host update() can't clobber it)
         // and repaint immediately from the optimistically-updated model.
-        this.rawCfg = makeCfg(() => this.settings, persist, (key, value) => {
+        this.rawCfg = makeCfg(() => this.settings, batchPersist, (key, value) => {
             this.pending.set(key, value);
         }, undefined, () => this.flags);
         // Wrap all user-authored settings actions as one history transaction. A

@@ -7,10 +7,12 @@
  * (adjacency, layout) downstream is pure and Power-BI-free.
  *
  * Node attributes (category / size / parent) are edge-level in the DataView but
- * node-level in the graph, so we bind them from the row where a node first
- * appears as SOURCE. Target-only nodes get nulls and fall back to neutral colour
- * / degree-based size. (MVP simplification — a later pass can add an explicit
- * node table role.)
+ * node-level in the graph, so we bind them from the row(s) where a node first
+ * appears as SOURCE. Categorical attributes (category/parent/geo/image/icon) take
+ * the first-seen row's value; size is a measure, so it ACCUMULATES across every
+ * source row for that node instead (NG-QA-003). Target-only nodes get nulls and
+ * fall back to neutral colour / degree-based size. (MVP simplification — a later
+ * pass can add an explicit node table role.)
  */
 
 import powerbi from "powerbi-visuals-api";
@@ -291,7 +293,15 @@ export function buildGraphData(
         // as a source, so bind its category from this row too — otherwise a pure sink
         // (a leaf) would stay uncoloured.
         if (!merge && r.nodeCategory >= 0 && tgt !== src && ta.category == null) ta.category = rawCat;
-        if (r.nodeSize >= 0 && sa.size == null) sa.size = asNumber(row[r.nodeSize]);
+        // Size is a measure (e.g. "Sum of nodeSize"), not a categorical attribute like
+        // category/parent — each row only carries that ROW's contribution, so the node's
+        // total must accumulate across every row where it appears as source, not just the
+        // first-seen one (NG-QA-003: first-seen-wins silently discarded all but one row's
+        // value, making node size effectively track row order instead of the bound measure).
+        if (r.nodeSize >= 0) {
+            const v = asNumber(row[r.nodeSize]);
+            if (v != null) sa.size = (sa.size ?? 0) + v;
+        }
         if (r.nodeParent >= 0 && sa.parent == null) {
             // Parent references merge through the same canonical identity, or the
             // hierarchy would silently split across spelling variants.

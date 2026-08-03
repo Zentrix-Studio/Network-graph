@@ -1042,6 +1042,24 @@ export class Visual implements IVisual {
         if (!s.nodes.showFullInfoOnClick.value) {
             this.openNode = null;
             this.detailPanel.hide();
+        } else {
+            // Reconcile the open panel against the CURRENT selection truth rather than
+            // sticky last-click memory (NG-QA-004). A Power BI bookmark restores
+            // selectionManager state directly — no click event fires — so without this,
+            // switching bookmarks left the panel showing whatever node a real click had
+            // last opened, ignoring what the newly-applied bookmark actually selected
+            // (including "nothing", which must close the panel).
+            const selected = this.selectionManager.getSelectionIds() as ISelectionId[];
+            const stillOpen = this.openNode != null && this.openNode < st.idsByNode.length
+                && !!st.idsByNode[this.openNode]
+                && st.idsByNode[this.openNode].some((id) => selected.some((sid) => idEquals(sid, id)));
+            if (!stillOpen) {
+                const idx = selected.length
+                    ? st.idsByNode.findIndex((ids) => !!ids && ids.some((id) => selected.some((sid) => idEquals(sid, id))))
+                    : -1;
+                this.openNode = idx >= 0 ? idx : null;
+                if (this.openNode == null) this.detailPanel.hide();
+            }
         }
         const overlaysDisabled = !s.toolbar.showOverlays.value;
         // Focus mode is entered from the quick-action eye button, so disabling

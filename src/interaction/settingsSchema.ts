@@ -19,6 +19,8 @@ import { SEMANTIC_ICON_NAMES, SEMANTIC_ICON_VALUES } from "./iconCatalog";
 
 type Model = VisualFormattingSettingsModel;
 type PersistFn = (object: string, prop: string, value: powerbi.DataViewPropertyValue) => void;
+/** Commits a batch of persisted properties, grouped by object, as ONE host call. */
+type BatchPersistFn = (merge: { objectName: string; properties: Record<string, powerbi.DataViewPropertyValue> }[]) => void;
 
 interface Entry {
     get(m: Model): unknown;
@@ -296,8 +298,25 @@ export function gearObjectNames(): Set<string> {
     return out;
 }
 
+/** Run one engine key's `Entry.set` and commit everything it persists as ONE batched
+ * host call, grouped by object. A composite key (e.g. nodes.clickMode, NG-QA-002) calls
+ * the collector several times for different real properties backing one mutually-exclusive
+ * selection — persisting each as its OWN separate host call risks a same-tick write race
+ * (a host that doesn't queue/merge back-to-back persistProperties calls can drop all but
+ * the last one), which would silently desync the composite's booleans from each other and
+ * from what the gear displays. One call per edit closes that race entirely. */
+function persistEntry(batch: BatchPersistFn, e: Entry, value: unknown): void {
+    const grouped = new Map<string, Record<string, powerbi.DataViewPropertyValue>>();
+    e.set((object, prop, v) => {
+        const properties = grouped.get(object) ?? {};
+        properties[prop] = v;
+        grouped.set(object, properties);
+    }, value);
+    if (grouped.size) batch([...grouped].map(([objectName, properties]) => ({ objectName, properties })));
+}
+
 export function makeCfg(
-    getModel: () => Model, persist: PersistFn,
+    getModel: () => Model, batch: BatchPersistFn,
     onChange?: (key: string, value: unknown) => void, reset?: () => void,
     getFlags?: () => Record<string, unknown>,
 ): SBCfg {
@@ -312,7 +331,7 @@ export function makeCfg(
         set(key: string, value: unknown): void {
             const e = KEYS[key]; if (!e) return;
             e.setLocal(getModel(), value); // optimistic
-            e.set(persist, value);         // durable
+            persistEntry(batch, e, value);  // durable, one atomic host call
             onChange?.(key, value);
         },
         // Per-card reset: read each key's default off a fresh model, then persist +
@@ -324,7 +343,7 @@ export function makeCfg(
                 const e = KEYS[key]; if (!e) continue;
                 const def = e.get(fresh);
                 e.setLocal(getModel(), def);
-                e.set(persist, def);
+                persistEntry(batch, e, def);
                 onChange?.(key, def);
             }
         },
