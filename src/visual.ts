@@ -1494,10 +1494,15 @@ export class Visual implements IVisual {
         // Drill-down (NG-072) shares this hierarchy.
         this.collapsedHidden = new Set<number>();
         const hcard = s.hierarchy;
-        // An explicit Node-parent binding owns fold/drill semantics. Drag additionally
-        // needs a hierarchy for the common Source/Target-only star graph shown in the
-        // visual, so when that role is absent it reuses Tree mode's deterministic
-        // spanning forest (highest-degree centre per component, then BFS descendants).
+        // An explicit Node-parent binding owns fold/drill semantics when bound. Without
+        // one, both drag AND Expand/Drill-down fall back to the same link-derived
+        // spanning forest (highest-degree centre per component, then BFS descendants) —
+        // "Expand and Drill-down follow the bound Node parent, or a hierarchy derived
+        // from link connectivity" (KICKOFF-PROMPT.md / the On-click field's own gear
+        // copy). `hier` used to be pinned to `explicitHierarchy` alone, so without a
+        // Node-parent role bound — the common case, since it's optional — `hierState`
+        // stayed permanently null and Expand/collapse (and Drill-down) silently did
+        // nothing on click, no matter the setting (NG-QA-002).
         const explicitHierarchy: Hierarchy | null = st.data.hasParent
             ? buildHierarchy(st.model, (i) => st.data.attrs[i]?.parent ?? null) : null;
         const dragHierarchy: Hierarchy = explicitHierarchy ?? (() => {
@@ -1505,7 +1510,7 @@ export class Visual implements IVisual {
             return buildHierarchy(st.model, (i) => parentKeys[i] ?? null);
         })();
         const hier: Hierarchy | null = (hcard.foldable.value || hcard.drilldown.value)
-            ? explicitHierarchy : null;
+            ? dragHierarchy : null;
         if (hier && hcard.foldable.value) {
             const sig = st.model.nodes.map((n, i) =>
                 `${n.key}\u0000${st.data.attrs[i]?.parent ?? ""}`).join("\u0001");
