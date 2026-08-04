@@ -74,6 +74,11 @@ export class ViewToggle {
     private surface: Surface | null = null;
     /** Which non-graph segments are currently offered (graph is always on). */
     private enabled: Record<ViewKind, boolean> = { graph: true, table: true, insight: false };
+    /** Reduced mode (NG-271): after the trial ends, the non-graph segments stay VISIBLE but
+     *  greyed and can't be selected — clicking one fires `onLockedClick` (the upgrade banner). */
+    private locked = false;
+    /** Fired when a locked (post-trial) non-graph segment is clicked. Set by the visual. */
+    onLockedClick: (() => void) | null = null;
 
     constructor(host: HTMLElement, private onToggle: (next: ViewKind) => void) {
         this.root = document.createElement("div");
@@ -97,6 +102,7 @@ export class ViewToggle {
         // old one-button toggle semantics for keyboard/automation callers.
         this.root.onclick = (e) => {
             e.stopPropagation();
+            if (this.locked) { this.onLockedClick?.(); return; }
             this.select(this.nextEnabled(this.kind));
         };
 
@@ -130,7 +136,11 @@ export class ViewToggle {
         const t = document.createElement("span");
         t.textContent = label;
         b.appendChild(t);
-        b.onclick = (e) => { e.stopPropagation(); this.select(kind); };
+        b.onclick = (e) => {
+            e.stopPropagation();
+            if (this.locked && kind !== "graph") { this.onLockedClick?.(); return; }
+            this.select(kind);
+        };
         this.root.appendChild(b);
         return b;
     }
@@ -155,6 +165,13 @@ export class ViewToggle {
         this.segs.table.style.display = opts.table ? "flex" : "none";
         this.segs.insight.style.display = opts.insight ? "flex" : "none";
         if (!this.enabled[this.kind]) this.kind = "graph";
+        this.reflect();
+    }
+
+    /** Reduced mode (NG-271): keep the pill and its segments VISIBLE but grey the non-graph
+     *  ones and block selection (a click fires `onLockedClick`). Graph stays fully usable. */
+    setLocked(locked: boolean): void {
+        this.locked = locked;
         this.reflect();
     }
 
@@ -190,6 +207,12 @@ export class ViewToggle {
             const fill = this.surface?.selected ?? accent;
             seg.style.background = active ? fill : "transparent";
             seg.style.color = active ? "#FFFFFF" : (this.surface?.fg ?? "#15161E");
+            // Reduced mode (NG-271): grey the non-graph segments (greyed, not hidden) and
+            // mark them disabled — the click handlers already route to onLockedClick.
+            const greyed = this.locked && kind !== "graph";
+            seg.style.opacity = greyed ? "0.4" : "1";
+            seg.style.cursor = greyed ? "not-allowed" : "pointer";
+            seg.setAttribute("aria-disabled", greyed ? "true" : "false");
         }
     }
 

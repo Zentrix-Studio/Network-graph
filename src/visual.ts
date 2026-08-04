@@ -103,6 +103,13 @@ function round2(n: number): number { return Math.round(n * 100) / 100; }
  *  repeated exploration still feels direct. */
 const FOLD_MOTION_MS = 260;
 
+/** Reduced-mode upgrade message (NG-271), shown via Power BI's predefined `notifyFeatureBlocked`
+ *  banner when an author interacts with a disabled control after the 30-day trial ends. Report
+ *  viewers keep full access for free, so this only ever fires in unlicensed edit mode. */
+const REDUCED_MODE_MSG =
+    "Your 30-day free trial has ended. Subscribe to re-enable the gear, advanced settings and "
+    + "analytical views. The graph still works, and report viewers keep full access for free.";
+
 /** Stable edge identities for refresh enter/update/exit, including parallel edges. */
 function motionEdgeKeys(model: GraphModel): string[] {
     const seen = new Map<string, number>();
@@ -696,10 +703,9 @@ export class Visual implements IVisual {
             // Viewers-free enforcement: the gate only ever bites in edit/authoring
             // mode (ViewMode.Edit / InFocusEdit); Reading view always fail-opens.
             this.premium.refresh(options.viewMode != null && options.viewMode !== 0);
-            // Freemium branding (NG-263): keep the Zentrix watermark non-removable while
-            // unlicensed — coerce the setting ON so an unlicensed author can't persist it
-            // off (viewers would otherwise see no mark). A licence restores the toggle.
-            if (!this.premium.active) this.formattingSettings.branding.show.value = true;
+            // No forced watermark (NG-271): the base tier is the free path once the trial
+            // ends, and Microsoft forbids watermarks on free features. The Zentrix mark is a
+            // plain author-controlled toggle now, never coerced by licence state.
 
             // Progressive data loading (T11). The table mapping windows rows at 30k per
             // segment; when the host reports another segment (`metadata.segment`) and we
@@ -876,11 +882,20 @@ export class Visual implements IVisual {
             // it's narrow tiles that break.
             const needsFocusForSettings = !options.isInFocus
                 && (width < 640 || height < 400);
-            this.toolbar.setOpenGate(needsFocusForSettings ? () => {
-                try { this.host.switchFocusModeState(true); } catch { return false; }
-                this.pendingFocusOpen = true;
-                return true;
-            } : null);
+            this.toolbar.setOpenGate(
+                !this.premium.active
+                    // Reduced mode (NG-271): after the trial the gear is disabled — a click is
+                    // consumed into Power BI's predefined upgrade banner instead of opening the
+                    // settings. Takes priority over the small-tile focus-mode gate.
+                    ? () => { this.premium.blockFeature(REDUCED_MODE_MSG); return true; }
+                    : needsFocusForSettings ? () => {
+                        try { this.host.switchFocusModeState(true); } catch { return false; }
+                        this.pendingFocusOpen = true;
+                        return true;
+                    } : null,
+            );
+            // Reduced mode (NG-271): grey the gear icon (visible, not hidden) once the trial ends.
+            this.toolbar.setLocked(!this.premium.active);
             if (options.isInFocus && this.pendingFocusOpen) {
                 this.pendingFocusOpen = false;
                 this.toolbar.forceOpen();
@@ -1046,14 +1061,14 @@ export class Visual implements IVisual {
     /** Draw the graph (or the summary table) from a render state. */
     private paint(st: RenderState, settle = false): void {
         const s = this.formattingSettings;
-        // Whole-visual paid lock (CEO 2026-08-04): the go-paid model is a 30-day free trial
-        // of everything, then the WHOLE visual is paid — not freemium. When the licence gate
-        // resolves inactive (edit/authoring mode with no usable plan; viewers and every
-        // fail-open path keep premium.active true), block the entire visual behind the
-        // trial placeholder instead of degrading to a free graph. paint() is the single async
-        // choke point hit by both the host-update and optimistic-gear paths, so the resolved
-        // lock is always caught here. Re-applies NG-262 (reverted by NG-263's freemium pivot).
-        if (!this.premium.active) { this.renderLicenceLock(st); return; }
+        // Reduced-mode model (CEO 2026-08-05, NG-271): NOT a whole-visual lock. When the
+        // licence gate resolves inactive (edit/authoring mode, trial over / no plan), the graph
+        // STILL renders — base features + native interactions (tooltip, hover, cross-filter,
+        // context menu) — but the whole Zentrix control surface (gear, view switch, action bar)
+        // is DISABLED (greyed, not hidden) below. During the trial and once purchased (Active
+        // plan) everything is live; viewers/read view always fail-open to full. The graph
+        // degrades to the base tier via the existing per-feature gates (advanced features off
+        // after trial), consistent with "advanced features unavailable once the trial ends."
         // Freemium feedback (NG-264): if an unlicensed author toggled on a premium feature —
         // it's silently gated off in the render — raise Power BI's predefined "feature blocked"
         // banner once so the toggle isn't a confusing no-op. Edge-triggered so the 10s banner
@@ -1126,8 +1141,15 @@ export class Visual implements IVisual {
         // legacy bottom-right dodge — LEFT of the gear when it anchors bottom-right,
         // ABOVE the Zentrix watermark, else flush in the corner.
         const tableSeg = s.summaryTable.show.value;
-        const insightSeg = this.premium.active && s.insights.show.value;
+        // Segment OFFERING is decoupled from licence (NG-271) so the Insight tile stays
+        // VISIBLE-but-greyed after the trial rather than vanishing; selection is what gets
+        // gated below via setLocked. Viewers/read mode (premium.active true) switch freely.
+        const insightSeg = s.insights.show.value;
         this.viewToggle.setSegments({ table: tableSeg, insight: insightSeg });
+        // Reduced mode: after the trial the non-graph views are greyed and unselectable; a
+        // click raises Power BI's predefined upgrade banner (never our own popup).
+        this.viewToggle.onLockedClick = () => this.premium.blockFeature(REDUCED_MODE_MSG);
+        this.viewToggle.setLocked(!this.premium.active);
         // If the current view's segment was just turned off, follow the pill back to graph.
         if (this.viewMode !== "graph" && this.viewToggle.current() === "graph") this.viewMode = "graph";
         if (this.viewToggle.hasAlternateView() && !hideChrome && !smallTile) {
@@ -1225,12 +1247,15 @@ export class Visual implements IVisual {
         // reset layout. History covers every authored visual change, while reset
         // remains specifically about node positions.
         if (s.toolbar.actions.value && !hideChrome && !smallTile) {
+            // Reduced mode (NG-271): after the trial the action bar is disabled (greyed) along
+            // with the rest of the Zentrix controls. `acts` gates every button on the licence.
+            const acts = this.premium.active;
             this.actionBar.setState(
-                true, // zoom/fit buttons are free (NG-266 — basic zoom/pan is table-stakes, not Pro)
-                this.undoHistory.length > 0,
-                this.redoHistory.length > 0,
-                s.pin.pinned.value || this.storedPositions != null,
-                this.downloadService() != null,
+                acts,
+                acts && this.undoHistory.length > 0,
+                acts && this.redoHistory.length > 0,
+                acts && (s.pin.pinned.value || this.storedPositions != null),
+                acts && this.downloadService() != null,
             );
             this.actionBar.show();
         } else {
@@ -4285,12 +4310,11 @@ export class Visual implements IVisual {
     }
 
     // --- Empty/fatal states -------------------------------------------------
-    /** Zentrix watermark visibility (NG-263 freemium): forced ON while unlicensed
-     *  (the free-tier mark), removable only once a licence is active (trial or paid).
-     *  `premium.active` is the edit-mode licence signal; viewers/read honour the saved
-     *  value (kept ON for unlicensed authors by the coercion in update()). */
+    /** Zentrix watermark visibility (NG-271): a plain author-controlled toggle, no longer
+     *  coupled to licence state (no forced watermark — the base tier is free, and Microsoft
+     *  forbids watermarks on free features). */
     private brandingVisible(): boolean {
-        return !this.premium.active || this.formattingSettings.branding.show.value;
+        return this.formattingSettings.branding.show.value;
     }
 
     private renderEmptyState(reason: EmptyReason, w: number, h: number, surface: Surface): void {
@@ -4330,67 +4354,6 @@ export class Visual implements IVisual {
             .text(message.detail);
     }
 
-    /** Whole-visual paid lock (CEO 2026-08-04, re-applies NG-262). Only reached when the
-     *  licence gate resolves inactive — edit/authoring mode with no usable plan; viewers and
-     *  every fail-open path keep `premium.active` true and never land here. Tears down the
-     *  graph + all floating chrome (mirrors the empty-state teardown) and draws a branded,
-     *  arithmetically-centred trial placeholder. The host's predefined "licence required"
-     *  banner (raised by the gate) carries the real trial/upgrade action — this is never our
-     *  own licensing UI. No `getBBox`, no `innerHTML`, theme-aware (light/dark/HC). */
-    private renderLicenceLock(st: RenderState): void {
-        const surface = this.surfaceFor(st.dark, st.hc);
-        const w = st.width, h = st.height;
-        // Teardown: clear every SVG layer and hide all floating chrome so nothing peeks
-        // through behind the lock (same set the missing-role empty state hides).
-        this.clearLayers();
-        this.pendingMotion = null;
-        this.graphPainted = false;
-        this.viewToggle.hide();
-        this.actionBar.hide();
-        this.openNode = null;
-        this.detailPanel.hide();
-        this.enterprisePanel.hide();
-        this.rulesPanel.hide();
-        this.removeSummary();
-        this.toolbar.update(this.formattingSettings, st.dark, true); // accessibility-only, no gear
-
-        const cx = w / 2, cy = h / 2;
-        const g = this.overlayGroup;
-        const brand = st.hc ? surface.fg : accent;
-        // Card only when the tile can hold it; otherwise fall back to the two text lines.
-        const cardW = Math.min(Math.max(w - 32, 0), 340);
-        const cardH = 132;
-        if (cardW >= 220 && h >= cardH + 16) {
-            g.append("rect")
-                .attr("x", cx - cardW / 2).attr("y", cy - cardH / 2)
-                .attr("width", cardW).attr("height", cardH)
-                .attr("rx", 12).attr("ry", 12)
-                .attr("fill", surface.bg)
-                .attr("stroke", surface.muted).attr("stroke-opacity", st.hc ? 1 : 0.25);
-            g.append("rect")
-                .attr("x", cx - 74).attr("y", cy - cardH / 2 + 16)
-                .attr("width", 148).attr("height", 22).attr("rx", 11).attr("ry", 11)
-                .attr("fill", "none").attr("stroke", brand).attr("stroke-opacity", st.hc ? 1 : 0.9);
-            g.append("text")
-                .attr("x", cx).attr("y", cy - cardH / 2 + 27)
-                .attr("text-anchor", "middle").attr("dominant-baseline", "middle")
-                .attr("font-family", fontFamily).attr("font-size", 10).attr("font-weight", 700)
-                .attr("letter-spacing", 0.6).attr("fill", brand)
-                .text("30-DAY FREE TRIAL");
-        }
-        g.append("text")
-            .attr("x", cx).attr("y", cy + 8)
-            .attr("text-anchor", "middle").attr("dominant-baseline", "middle")
-            .attr("font-family", fontFamily).attr("font-size", 14).attr("font-weight", 600)
-            .attr("fill", surface.fg)
-            .text("This visual requires a license");
-        g.append("text")
-            .attr("x", cx).attr("y", cy + 30)
-            .attr("text-anchor", "middle").attr("dominant-baseline", "middle")
-            .attr("font-family", fontFamily).attr("font-size", 11)
-            .attr("fill", surface.muted)
-            .text("Use the license prompt on this visual to start your free trial");
-    }
 
     private renderFatal(w: number, h: number): void {
         try {
@@ -4422,10 +4385,9 @@ export class Visual implements IVisual {
     }
 
     public getFormattingModel(): powerbi.visuals.FormattingModel {
-        // Pin the Zentrix watermark toggle (NG-266): disabled (greyed) while unlicensed so it
-        // can't be turned off. The render also forces it on (brandingVisible) and update()
-        // coerces the value, so the mark is non-removable on the free tier.
-        this.formattingSettings.branding.show.disabled = !this.premium.active;
+        // NG-271: the Zentrix watermark toggle is a plain author control (no forced watermark,
+        // no licence coupling) — the base tier is free and Microsoft forbids watermarks on
+        // free features.
         return this.formattingSettingsService.buildFormattingModel(this.formattingSettings);
     }
 }

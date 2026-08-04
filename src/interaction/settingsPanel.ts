@@ -331,6 +331,11 @@ export class SettingsOverlay {
         this.bar.setOpenGate(fn);
     }
 
+    /** Reduced mode (NG-271): grey the gear icon when the trial has ended (still visible). */
+    setLocked(locked: boolean): void {
+        this.bar.setLocked(locked);
+    }
+
     /** Called by the visual after layout when position = Auto. No-op otherwise. */
     setCorner(corner: string): void {
         if (this.pref === "auto") this.bar.setCorner(corner);

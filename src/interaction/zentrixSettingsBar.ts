@@ -407,6 +407,14 @@ export class ZentrixSettingsBar {
         if (accent && c.background) s.setProperty("--hc-on-accent", c.background);
     }
     setVisible(show: boolean): void { this.anchor.style.display = show ? "flex" : "none"; }
+    /** Reduced mode (NG-271): grey the gear icon (still VISIBLE, not hidden) when the 30-day
+     *  trial has ended. The open-gate consumes the click into the upgrade banner; this just
+     *  makes it look disabled so the user understands why. */
+    setLocked(locked: boolean): void {
+        this.gear.style.opacity = locked ? "0.4" : "";
+        this.gear.style.cursor = locked ? "not-allowed" : "";
+        this.gear.setAttribute("aria-disabled", locked ? "true" : "false");
+    }
     setCloseOnAway(v: boolean): void { this.opts.closeOnAway = v; }
     setCorner(corner: string): void {
         if (corner === this.corner && this.anchor.getAttribute("data-corner") === corner) return;
