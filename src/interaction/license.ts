@@ -1,16 +1,18 @@
 "use strict";
 
 /**
- * Premium licence gate for the Enterprise tier (clustering, scale mode, …),
- * now wired to Power BI's transactable Licensing API (API ≥ 4.7).
+ * Licence gate wired to Power BI's transactable Licensing API (API ≥ 4.7).
+ * FREEMIUM go-paid (CEO 2026-08-04, NG-263): `premium.active === false` gates the
+ * 11 enterprise features AND forces the Zentrix watermark on (visual.ts). The base
+ * graph always renders — no whole-visual block. (NG-262's hard-trial lock reverted.)
  *
- * Deliberately FAIL-OPEN: an unsupported host/environment, unavailable licence
- * info (signed-out/offline Desktop), or any licence-API error all resolve to
- * ACTIVE. `LOCK_ON_NO_PLAN` stays false until a paid plan is provisioned in
- * Partner Center and verified in Service — flipping it early would lock out
- * every user (most hosts return no plan), so it is a deliberate go-paid switch,
- * not a default. A published visual cannot be end-to-end license-tested, so the
- * evaluation is a PURE function (`evaluateLicense`) pinned by mocked-API tests.
+ * Still FAIL-OPEN on the safe paths: an unsupported host/environment, unavailable
+ * licence info (signed-out/offline Desktop), or any licence-API error all resolve
+ * to ACTIVE. `LOCK_ON_NO_PLAN` is ON now — the AppSource plan (with Microsoft's
+ * one-month free trial) MUST be live at go-live or every creator locks out. A
+ * published visual cannot be end-to-end license-tested, so the evaluation is a
+ * PURE function (`evaluateLicense`) pinned by mocked-API tests; give the reviewer
+ * licence info in "Notes for certification".
  *
  * Enforcement posture (CEO decision 2026-07-23): **viewers are free.** Licences
  * are enforced in edit/authoring mode only; Reading view always fail-opens.
@@ -27,8 +29,11 @@
 import powerbi from "powerbi-visuals-api";
 import IVisualHost = powerbi.extensibility.visual.IVisualHost;
 
-/** Go-paid master switch. Flip ONLY after the AppSource plan is live + verified. */
-const LOCK_ON_NO_PLAN = false;
+/** Go-paid master switch — ON (CEO 2026-08-04, NG-263): freemium. Gates the 11
+ *  enterprise features + forces the Zentrix watermark while unlicensed; the base
+ *  graph stays free forever. Ships enforcing; the paid plan (with the one-month
+ *  trial of the premium tier) must be live at go-live. */
+const LOCK_ON_NO_PLAN = true;
 /** Viewers-free posture: enforce in edit mode only. Leave false unless the CEO
  *  reverses the 2026-07-23 decision to charge report viewers too. */
 const ENFORCE_FOR_VIEWERS = false;
