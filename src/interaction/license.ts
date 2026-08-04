@@ -85,6 +85,7 @@ export function evaluateLicense(
 interface LicenseManagerLike {
     getAvailableServicePlans?: () => Promise<LicenseInfoLike>;
     notifyLicenseRequired?: (type: number) => Promise<boolean>;
+    notifyFeatureBlocked?: (tooltip: string) => Promise<boolean>;
     clearLicenseNotification?: () => Promise<boolean>;
 }
 
@@ -97,6 +98,18 @@ export class PremiumGate {
     /** Whether Enterprise features are unlocked. Fail-open. */
     get active(): boolean {
         return this.activeState;
+    }
+
+    /** Transient "this feature needs a licence" banner (freemium, NG-264). Best-effort;
+     *  fires only while unlicensed (a licensed / fail-open session is a no-op). Uses Power BI's
+     *  predefined `notifyFeatureBlocked` — never our own UI. The caller edge-triggers it so the
+     *  10-second banner isn't re-raised on every repaint. */
+    blockFeature(tooltip: string): void {
+        if (this.activeState) return;
+        try {
+            const lm = (this.host as unknown as { licenseManager?: LicenseManagerLike }).licenseManager;
+            void lm?.notifyFeatureBlocked?.(tooltip);
+        } catch { /* cosmetic — never break the gate */ }
     }
 
     /**

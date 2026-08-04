@@ -439,12 +439,18 @@ const paletteFilter = (g: (key: string) => unknown, _id: string, pal?: SBPalette
     return true;
 };
 
+/** Reason shown when a Pro feature's control is dimmed on the free tier (NG-268).
+ *  Paired with `dimIf: (g) => !g("@licensed")` so the gear greys it + shows this on hover. */
+const PRO_REASON = "Premium — start your free 30-day trial to unlock it.";
+
 export const SB_CATS: SBCategory[] = [
     { id: "layout", name: "Layout", flat: true, subs: [{ id: "layout", kind: "fields", fields: [
         { control: "tiles", label: "Mode", key: "layout.mode", tileColumns: 3,
             options: [opt("force", "Force"), opt("circle", "Concentric"), opt("ring", "Circular"),
                 opt("grid", "Grid"), opt("tree", "Tree"),
-                depOpt("geo", "Geo", (g) => !g("@hasGeo"), "Add valid Latitude and Longitude data to enable Geo layout.")],
+                { value: "geo", label: "Geo", disabledIf: (g) => !g("@licensed") || !g("@hasGeo"),
+                    disabledReasonFn: (g) => !g("@licensed") ? PRO_REASON
+                        : "Add valid Latitude and Longitude data to enable Geo layout." }],
             tileIcons: { force: "force", circle: "concentric", ring: "circular", grid: "grid", tree: "tree", geo: "geo" },
             info: "Force reveals general network clusters. Concentric puts the strongest hub in the centre and progressively lower-connectivity nodes on grouped outer rings. Circular places every node on a single ring in a crossing-minimising order. Grid arranges nodes on a stable square grid, hubs first. Tree uses the original layered hierarchy, chooses the most connected root when no Node parent is bound, and defaults to maximum link curvature (override it in Edges ▸ Curvature). Geo needs Latitude and Longitude. Choosing a mode clears a pinned layout so the new mode can run." },
         { control: "note", label: "Hierarchy inferred from link connectivity. Add a Node parent field when the report needs an exact business hierarchy.",
@@ -586,8 +592,8 @@ export const SB_CATS: SBCategory[] = [
                 options: [
                     opt("filter", "Cross-filter only"),
                     opt("info", "Show full info"),
-                    opt("expand", "Expand / collapse"),
-                    opt("drilldown", "Drill-down")],
+                    depOpt("expand", "Expand / collapse", (g) => !g("@licensed"), PRO_REASON),
+                    depOpt("drilldown", "Drill-down", (g) => !g("@licensed"), PRO_REASON)],
                 info: "A node click does exactly one thing. Cross-filter only keeps the standard report interaction; the other three each take over the click, so cross-filtering may not fire while one is active. Show full info opens the node detail panel; Expand / collapse folds a parent's descendants; Drill-down makes the clicked node the temporary root. Expand and Drill-down follow the bound Node parent, or a hierarchy derived from link connectivity." },
             { control: "switch", label: "Start collapsed", key: "hierarchy.startCollapsed",
                 visibleIf: (g) => String(g("nodes.clickMode")) === "expand",
@@ -901,6 +907,7 @@ export const SB_CATS: SBCategory[] = [
         { id: "ovViews", name: "View switch", kind: "fields", fields: [
             { control: "switch", label: "Summary table", key: "summaryTable.show" },
             { control: "switch", label: "Insights", key: "insights.show",
+                dimIf: (g) => !g("@licensed"), disabledReason: PRO_REASON,
                 note: "A plain-English read-out of the network — hubs, connectivity, bridges, density" },
             { control: "select", label: "Position", key: "summaryTable.position", options: POS5,
                 dimIf: (g) => !g("summaryTable.show") && !g("insights.show"),
@@ -944,7 +951,7 @@ export const SB_CATS: SBCategory[] = [
     ] },
     { id: "enterprise", name: "Enterprise", subs: [
         { id: "clusters", name: "Clusters", kind: "fields", fields: [
-            { control: "switch", label: "Show clusters", key: "clusters.show" },
+            { control: "switch", label: "Show clusters", key: "clusters.show", dimIf: (g) => !g("@licensed"), disabledReason: PRO_REASON },
             { control: "select", label: "Cluster by", key: "clusters.clusterBy",
                 options: [opt("auto", "Auto (communities)"),
                     depOpt("category", "Category field", (g) => !g("@hasCategory"), "Add data to the Node category field well to enable Category field."),
@@ -1069,15 +1076,18 @@ export const SB_CATS: SBCategory[] = [
                 info: "Defaults to All so every available relationship between shown nodes is retained. Set a positive value only when you deliberately want a performance cap; Load beyond 30k rows requests additional Power BI data windows until all rows or that cap is reached." },
             { control: "switch", label: "Load beyond 30k rows", key: "scale.fetchMore",
                 note: "Requests more data windows until all rows or the explicit Max-edges cap is reached" },
-            { control: "switch", label: "Minimap", key: "scale.minimap" },
+            { control: "switch", label: "Minimap", key: "scale.minimap", dimIf: (g) => !g("@licensed"), disabledReason: PRO_REASON },
         ] },
         { id: "analysis", name: "Analysis", kind: "fields", fields: [
             { control: "select", label: "Importance", key: "centrality.metric", options: [opt("none", "Off"), opt("degree", "Degree"), opt("betweenness", "Bridges"), opt("closeness", "Reach"), opt("pagerank", "Influence")],
+                dimIf: (g) => !g("@licensed"), disabledReason: PRO_REASON,
                 info: "Calculates node importance for size, labels, colour, rules, filtering, and tooltips. Degree counts links; Bridges finds connectors between groups (betweenness); Reach favours nodes close to all others (closeness); Influence favours links from important nodes (PageRank)." },
-            { control: "switch", label: "Search box", key: "find.show" },
+            { control: "switch", label: "Search box", key: "find.show", dimIf: (g) => !g("@licensed"), disabledReason: PRO_REASON },
             { control: "switch", label: "Explore mode", key: "explore.show",
+                dimIf: (g) => !g("@licensed"), disabledReason: PRO_REASON,
                 info: "Adds an exploration control for focusing on a selected node and its neighbourhood. It changes the visible subgraph, not the underlying data." },
             { control: "switch", label: "Path analysis", key: "path.show",
+                dimIf: (g) => !g("@licensed"), disabledReason: PRO_REASON,
                 info: "Adds controls for selecting two nodes and highlighting the shortest path between them." },
             { control: "switch", label: "Use link values", key: "path.weighted",
                 dimIf: (g) => !g("path.show") || !g("@hasWeight"),
@@ -1086,9 +1096,10 @@ export const SB_CATS: SBCategory[] = [
                     : "Add data to the Edge weight field well to use link values as path costs.",
                 info: "Has an effect only when Path analysis is on. It uses the bound Edge weight values as path costs and finds the lowest-cost route; without usable values, the fewest-links route is used." },
             { control: "switch", label: "Time animation", key: "temporal.show",
-                dimIf: (g) => !g("@hasTime") || canvasWillRender(g)
+                dimIf: (g) => !g("@licensed") || !g("@hasTime") || canvasWillRender(g)
                     || (!!g("clusters.show") && !!g("clusters.collapse")),
-                disabledReasonFn: (g) => !g("@hasTime")
+                disabledReasonFn: (g) => !g("@licensed") ? PRO_REASON
+                    : !g("@hasTime")
                     ? "Add valid data to the Time field well to enable time animation."
                     : !!g("clusters.show") && !!g("clusters.collapse")
                         ? "Turn off Collapse to meta-nodes to animate the original timed links."

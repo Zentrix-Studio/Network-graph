@@ -263,6 +263,8 @@ export class Visual implements IVisual {
      *  collapse a settings panel that was opened on the large focus canvas (NG-265). */
     private prevIsInFocus = false;
     private premium: PremiumGate;
+    /** Edge-trigger for the freemium "feature blocked" banner (NG-264). */
+    private premiumNag = false;
     private zoom: ZoomController;
     private enterprisePanel: EnterprisePanel;
     private rulesPanel: RulesPanel;
@@ -746,6 +748,8 @@ export class Visual implements IVisual {
             const maxEdges = this.maxEdgeBudget();
             const data0 = buildGraphData(dataView!, maxEdges, {
                 mergeDuplicates: this.formattingSettings.nodes.mergeDuplicates.value,
+                // Free tier is capped at 500 nodes (NG-266); Pro (licensed) gets the full network.
+                maxNodes: this.premium.active ? Infinity : 500,
             });
             const model0 = buildGraphModel(data0.edges, data0.labelByKey);
 
@@ -798,7 +802,7 @@ export class Visual implements IVisual {
             this.lastModelSig = modelSig;
             // View-switch visibility is gated inside paint() (summaryTable.show), so a
             // gear edit takes effect on the optimistic rerenderFromSettings path too.
-            this.zoom.setEnabled(this.premium.active);
+            this.zoom.setEnabled(true); // basic zoom/pan is free (NG-266); large-network Scale mode + minimap stay Pro
             this.zoom.reset(); // new data → re-fit
 
             // Enterprise explore/path pickers: repopulate for the new node set and
@@ -849,6 +853,9 @@ export class Visual implements IVisual {
                 hasTime: data0.hasTime,
                 hasTooltips: data0.hasTooltips,
                 hasGeo: data0.attrs.some((attr) => attr.lat != null && attr.lon != null),
+                // Licence state for the gear's `@licensed` gate (NG-268): Pro fields dim with a
+                // "start your trial" reason while unlicensed. Fail-open paths keep active=true.
+                licensed: this.premium.active,
                 canvasAvailable: !!this.ctx,
                 nodeCount: model.nodes.length,
                 edgeCount: model.links.length,
@@ -1039,6 +1046,34 @@ export class Visual implements IVisual {
     /** Draw the graph (or the summary table) from a render state. */
     private paint(st: RenderState, settle = false): void {
         const s = this.formattingSettings;
+        // Whole-visual paid lock (CEO 2026-08-04): the go-paid model is a 30-day free trial
+        // of everything, then the WHOLE visual is paid — not freemium. When the licence gate
+        // resolves inactive (edit/authoring mode with no usable plan; viewers and every
+        // fail-open path keep premium.active true), block the entire visual behind the
+        // trial placeholder instead of degrading to a free graph. paint() is the single async
+        // choke point hit by both the host-update and optimistic-gear paths, so the resolved
+        // lock is always caught here. Re-applies NG-262 (reverted by NG-263's freemium pivot).
+        if (!this.premium.active) { this.renderLicenceLock(st); return; }
+        // Freemium feedback (NG-264): if an unlicensed author toggled on a premium feature —
+        // it's silently gated off in the render — raise Power BI's predefined "feature blocked"
+        // banner once so the toggle isn't a confusing no-op. Edge-triggered so the 10s banner
+        // doesn't re-fire on every repaint.
+        const wantsPremium = !this.premium.active && (
+            s.clusters.show.value || s.find.show.value || s.explore.show.value
+            || s.path.show.value || s.insights.show.value || s.temporal.show.value
+            || (s.centrality.metric.value.value as string) !== "none"
+            || (s.layout.mode.value.value as string) === "geo"
+            || s.hierarchy.foldable.value || s.hierarchy.drilldown.value
+            || s.scale.minimap.value);
+        if (wantsPremium && !this.premiumNag) {
+            this.premium.blockFeature(
+                "This is a Pro feature — start your free 30-day trial to unlock network analysis "
+                + "(community detection, centrality, path, insights, time), search & explore, Geo and "
+                + "advanced org-chart, minimap, and analytical table columns.");
+            this.premiumNag = true;
+        } else if (!wantsPremium) {
+            this.premiumNag = false;
+        }
         const surface = this.surfaceFor(st.dark, st.hc);
         this.rulesPanel.setAvailability({
             centrality: this.premium.active
@@ -1191,7 +1226,7 @@ export class Visual implements IVisual {
         // remains specifically about node positions.
         if (s.toolbar.actions.value && !hideChrome && !smallTile) {
             this.actionBar.setState(
-                this.premium.active,
+                true, // zoom/fit buttons are free (NG-266 — basic zoom/pan is table-stakes, not Pro)
                 this.undoHistory.length > 0,
                 this.redoHistory.length > 0,
                 s.pin.pinned.value || this.storedPositions != null,
@@ -1215,7 +1250,11 @@ export class Visual implements IVisual {
         // timer sliders (settle/zoom/label-fade) — the fixed defaults read best and the
         // knobs had no real use — so nothing overrides those custom properties anymore.
 
-        const mode = (s.layout.mode.value.value as LayoutMode) ?? "force";
+        const rawMode = (s.layout.mode.value.value as LayoutMode) ?? "force";
+        // Geo layout is Pro (NG-266): an unlicensed author falls back to force layout.
+        // (Advanced org-chart fold/drill is gated at the hierarchy build below; the basic
+        // tree layout stays free.)
+        const mode = (!this.premium.active && rawMode === "geo") ? "force" : rawMode;
         const pinned = s.pin.pinned.value;
         // Unpinned → drop any stale saved positions so a later pin freezes fresh.
         if (!pinned) this.storedPositions = null;
@@ -1516,7 +1555,10 @@ export class Visual implements IVisual {
             const parentKeys = deriveTreeParents(st.model);
             return buildHierarchy(st.model, (i) => parentKeys[i] ?? null);
         })();
-        const hier: Hierarchy | null = (hcard.foldable.value || hcard.drilldown.value)
+        // Advanced org-chart (Pro, NG-266): fold/collapse + drill-down need a licence. The
+        // basic tree layout stays free; nulling `hier` here nulls `hierState`, which cascades
+        // to every fold/drill read and the click handler (canNodeActivate).
+        const hier: Hierarchy | null = this.premium.active && (hcard.foldable.value || hcard.drilldown.value)
             ? dragHierarchy : null;
         if (hier && hcard.foldable.value) {
             const sig = st.model.nodes.map((n, i) =>
@@ -2651,7 +2693,7 @@ export class Visual implements IVisual {
         }
 
         // Path: highlight the shortest path between the two picked nodes.
-        if (s.path.show.value && this.pathSource && this.pathTarget) {
+        if (this.premium.active && s.path.show.value && this.pathSource && this.pathTarget) {
             const a = st.model.indexByKey.get(this.pathSource);
             const b = st.model.indexByKey.get(this.pathTarget);
             if (a === undefined || b === undefined) return;
@@ -2838,6 +2880,10 @@ export class Visual implements IVisual {
         if (st.data.truncated) {
             statusLines.push(`Showing ${st.data.truncated.shownRows.toLocaleString()} of `
                 + `${st.data.truncated.totalRows.toLocaleString()} edges`);
+        }
+        if (st.data.nodeCap) {
+            statusLines.push(`Showing ${st.data.nodeCap.shown.toLocaleString()} of `
+                + `${st.data.nodeCap.total.toLocaleString()} nodes — upgrade to Pro for the full network`);
         }
         const statusBottom = renderGraphStatus(this.overlayGroup, statusLines, st.width, surface);
         // Drill-down breadcrumb — redrawn here so it survives zoom/pan (overlay is cleared each time).
@@ -3485,7 +3531,7 @@ export class Visual implements IVisual {
     private syncHistoryControls(): void {
         if (!this.lastRender) return;
         this.actionBar.setState(
-            this.premium.active,
+            true, // zoom/fit buttons are free (NG-266)
             this.undoHistory.length > 0,
             this.redoHistory.length > 0,
             this.formattingSettings.pin.pinned.value || this.storedPositions != null,
@@ -4284,6 +4330,68 @@ export class Visual implements IVisual {
             .text(message.detail);
     }
 
+    /** Whole-visual paid lock (CEO 2026-08-04, re-applies NG-262). Only reached when the
+     *  licence gate resolves inactive — edit/authoring mode with no usable plan; viewers and
+     *  every fail-open path keep `premium.active` true and never land here. Tears down the
+     *  graph + all floating chrome (mirrors the empty-state teardown) and draws a branded,
+     *  arithmetically-centred trial placeholder. The host's predefined "licence required"
+     *  banner (raised by the gate) carries the real trial/upgrade action — this is never our
+     *  own licensing UI. No `getBBox`, no `innerHTML`, theme-aware (light/dark/HC). */
+    private renderLicenceLock(st: RenderState): void {
+        const surface = this.surfaceFor(st.dark, st.hc);
+        const w = st.width, h = st.height;
+        // Teardown: clear every SVG layer and hide all floating chrome so nothing peeks
+        // through behind the lock (same set the missing-role empty state hides).
+        this.clearLayers();
+        this.pendingMotion = null;
+        this.graphPainted = false;
+        this.viewToggle.hide();
+        this.actionBar.hide();
+        this.openNode = null;
+        this.detailPanel.hide();
+        this.enterprisePanel.hide();
+        this.rulesPanel.hide();
+        this.removeSummary();
+        this.toolbar.update(this.formattingSettings, st.dark, true); // accessibility-only, no gear
+
+        const cx = w / 2, cy = h / 2;
+        const g = this.overlayGroup;
+        const brand = st.hc ? surface.fg : accent;
+        // Card only when the tile can hold it; otherwise fall back to the two text lines.
+        const cardW = Math.min(Math.max(w - 32, 0), 340);
+        const cardH = 132;
+        if (cardW >= 220 && h >= cardH + 16) {
+            g.append("rect")
+                .attr("x", cx - cardW / 2).attr("y", cy - cardH / 2)
+                .attr("width", cardW).attr("height", cardH)
+                .attr("rx", 12).attr("ry", 12)
+                .attr("fill", surface.bg)
+                .attr("stroke", surface.muted).attr("stroke-opacity", st.hc ? 1 : 0.25);
+            g.append("rect")
+                .attr("x", cx - 74).attr("y", cy - cardH / 2 + 16)
+                .attr("width", 148).attr("height", 22).attr("rx", 11).attr("ry", 11)
+                .attr("fill", "none").attr("stroke", brand).attr("stroke-opacity", st.hc ? 1 : 0.9);
+            g.append("text")
+                .attr("x", cx).attr("y", cy - cardH / 2 + 27)
+                .attr("text-anchor", "middle").attr("dominant-baseline", "middle")
+                .attr("font-family", fontFamily).attr("font-size", 10).attr("font-weight", 700)
+                .attr("letter-spacing", 0.6).attr("fill", brand)
+                .text("30-DAY FREE TRIAL");
+        }
+        g.append("text")
+            .attr("x", cx).attr("y", cy + 8)
+            .attr("text-anchor", "middle").attr("dominant-baseline", "middle")
+            .attr("font-family", fontFamily).attr("font-size", 14).attr("font-weight", 600)
+            .attr("fill", surface.fg)
+            .text("This visual requires a license");
+        g.append("text")
+            .attr("x", cx).attr("y", cy + 30)
+            .attr("text-anchor", "middle").attr("dominant-baseline", "middle")
+            .attr("font-family", fontFamily).attr("font-size", 11)
+            .attr("fill", surface.muted)
+            .text("Use the license prompt on this visual to start your free trial");
+    }
+
     private renderFatal(w: number, h: number): void {
         try {
             this.clearLayers();
@@ -4314,6 +4422,10 @@ export class Visual implements IVisual {
     }
 
     public getFormattingModel(): powerbi.visuals.FormattingModel {
+        // Pin the Zentrix watermark toggle (NG-266): disabled (greyed) while unlicensed so it
+        // can't be turned off. The render also forces it on (brandingVisible) and update()
+        // coerces the value, so the mark is non-removable on the free tier.
+        this.formattingSettings.branding.show.disabled = !this.premium.active;
         return this.formattingSettingsService.buildFormattingModel(this.formattingSettings);
     }
 }

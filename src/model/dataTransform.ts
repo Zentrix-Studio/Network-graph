@@ -154,6 +154,12 @@ export function missingRequiredRole(dataView: DataView | undefined): EmptyReason
     const nt = normalize(dataView);
     if (!nt || !nt.columns.length) return "noData";
     const r = roleIndices(nt);
+    // Neither endpoint bound → the visual is unstarted/cleared → landing page, not a nag.
+    if (r.source < 0 && r.target < 0) return "noData";
+    // An endpoint missing AND no data rows → also unstarted: removing every field can leave a
+    // stale/phantom role behind (NG-267), so "Add a Target field" would show over an empty
+    // visual. Fall back to the landing page. A genuine partial binding still has rows → nags.
+    if ((r.source < 0 || r.target < 0) && !nt.rows.length) return "noData";
     if (r.source < 0) return "needSource";
     if (r.target < 0) return "needTarget";
     return null;
@@ -188,6 +194,9 @@ export function buildGraphData(
          *  node. The FIRST-SEEN spelling stays the display/natural key, so pin
          *  blobs and annotations anchored before the merge keep matching it. */
         mergeDuplicates?: boolean;
+        /** Free-tier node cap (NG-266): stop introducing new nodes past this many,
+         *  keeping edges among those already shown. Reported via `nodeCap`. */
+        maxNodes?: number;
     },
 ): GraphData {
     const nt = normalize(dataView) ?? { columns: [], rows: [], highlights: [], hasHighlight: false };
@@ -197,6 +206,11 @@ export function buildGraphData(
     // Merge is ON unless explicitly disabled — mirrors the product default (settings.ts)
     // so direct callers and the live visual agree on the standard "one node per name" view.
     const merge = opts?.mergeDuplicates ?? true;
+    // Free-tier node cap (NG-266): the honest max-node budget. Beyond it, edges that would
+    // introduce a NEW node are dropped and reported via `nodeCap`; edges among shown nodes stay.
+    const maxNodes = opts?.maxNodes ?? Infinity;
+    const allNodeKeys = new Set<string>(); // every distinct node in the data (for the honest total)
+    let nodeCapped = false;
 
     // Canonicalize a raw node string to its merged identity (first-seen spelling).
     const canonByNorm = new Map<string, string>();
@@ -265,6 +279,13 @@ export function buildGraphData(
         const src = roleKey(rawSrc, true);
         const tgt = roleKey(rawTgt, false);
 
+        // Free-tier node cap (NG-266): count the true total, then drop edges that would add a
+        // node beyond the cap (keeping edges among the nodes already shown). Deterministic.
+        allNodeKeys.add(src);
+        if (tgt !== src) allNodeKeys.add(tgt);
+        const newNodes = (orderByKey.has(src) ? 0 : 1) + (tgt !== src && !orderByKey.has(tgt) ? 1 : 0);
+        if (orderByKey.size + newNodes > maxNodes) { nodeCapped = true; continue; }
+
         validEdges++;
         if (edges.length >= maxEdges) { overBudget = true; continue; } // honest render cap
 
@@ -331,6 +352,7 @@ export function buildGraphData(
     for (const [key, order] of orderByKey) attrs[order] = attrByKey.get(key)!;
 
     const truncated = overBudget ? { shownRows: edges.length, totalRows: validEdges } : null;
+    const nodeCap = nodeCapped ? { shown: orderByKey.size, total: allNodeKeys.size } : null;
     // Inbound highlight is "active" only when the host actually differentiated rows
     // (some kept, some dimmed) — an all-highlighted mask dims nothing.
     const hasInboundHighlight = nt.hasHighlight && edgeHighlight.some((h) => !h);
@@ -354,6 +376,7 @@ export function buildGraphData(
         edgeTime,
         hasTime: r.time >= 0 && edgeTime.some((t) => t != null),
         truncated,
+        nodeCap,
         roleNames: roleDisplayNames(nt, r),
     };
 }
