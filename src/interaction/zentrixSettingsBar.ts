@@ -420,6 +420,12 @@ export class ZentrixSettingsBar {
     private openGate: (() => boolean) | null = null;
     setOpenGate(fn: (() => boolean) | null): void { this.openGate = fn; }
 
+    /** Host helper: collapse the bar (and any open popover) programmatically — e.g. when
+     *  the visual leaves focus mode / the report is clicked away, so a settings panel that
+     *  was opened on a large canvas can't linger and overflow the small tile it returns to.
+     *  Safe to call when already closed. */
+    close(): void { this.collapse(); }
+
     /** Harness/host helper: open the bar and, if given, the category containing `subId`. */
     forceOpen(subId?: string): void {
         this.expand();

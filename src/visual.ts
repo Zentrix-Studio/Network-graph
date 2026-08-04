@@ -259,6 +259,9 @@ export class Visual implements IVisual {
     /** UAT-7: a gear click on a small tile switched the report to focus mode; the
      *  bar auto-opens when the in-focus update() arrives. */
     private pendingFocusOpen = false;
+    /** Previous update()'s focus-mode state, so we can detect the focus→report exit and
+     *  collapse a settings panel that was opened on the large focus canvas (NG-265). */
+    private prevIsInFocus = false;
     private premium: PremiumGate;
     private zoom: ZoomController;
     private enterprisePanel: EnterprisePanel;
@@ -312,11 +315,6 @@ export class Visual implements IVisual {
 
     /** Positions blob (key→[x,y]) for pinned mode — from metadata or optimistic. */
     private storedPositions: string | null = null;
-    /** Whether the author has explicitly persisted either node-radius endpoint (NG-239).
-     *  Value-independent: it is the *presence* of the persisted property, not its value,
-     *  that switches off automatic density/canvas down-scaling — so a deliberate Max of 40
-     *  (or Min of 4) is honoured exactly instead of being mistaken for the untouched default. */
-    private radiusAuthored = false;
     /** Whether the author has explicitly persisted edge curvature (NG-242). When false, Tree
      *  layout applies its smart maximum-curvature default; when true, the author's value wins
      *  (including 0 for straight tree links). Same value-independent presence signal as above. */
@@ -696,6 +694,10 @@ export class Visual implements IVisual {
             // Viewers-free enforcement: the gate only ever bites in edit/authoring
             // mode (ViewMode.Edit / InFocusEdit); Reading view always fail-opens.
             this.premium.refresh(options.viewMode != null && options.viewMode !== 0);
+            // Freemium branding (NG-263): keep the Zentrix watermark non-removable while
+            // unlicensed — coerce the setting ON so an unlicensed author can't persist it
+            // off (viewers would otherwise see no mark). A licence restores the toggle.
+            if (!this.premium.active) this.formattingSettings.branding.show.value = true;
 
             // Progressive data loading (T11). The table mapping windows rows at 30k per
             // segment; when the host reports another segment (`metadata.segment`) and we
@@ -717,10 +719,6 @@ export class Visual implements IVisual {
 
             // Read persisted pinned positions (written by togglePin via persistProperties).
             this.storedPositions = readStoredPositions(dataView!);
-            // Whether either node-radius endpoint was ever persisted (NG-239). Combined with
-            // the settings bar's live pending edits so both a reloaded report and an in-flight
-            // gear drag count as "authored" and use the exact Min/Max instead of auto-scaling.
-            this.radiusAuthored = readObjectAuthored(dataView!, "nodes", ["minRadius", "maxRadius"]);
             // Whether edge curvature was ever persisted (NG-242) — lets an explicit value
             // override Tree's automatic max-curvature default, straight links included.
             this.curveAuthored = readObjectAuthored(dataView!, "edges", ["curve"]);
@@ -880,6 +878,15 @@ export class Visual implements IVisual {
                 this.pendingFocusOpen = false;
                 this.toolbar.forceOpen();
             }
+            // Leaving focus mode (back to the report) collapses an open settings panel
+            // (NG-265). On a small tile the gear opens settings by entering focus mode
+            // (UAT-7); on exit the report returns to its small size, where the master–
+            // detail popover no longer fits and would otherwise linger, overflowing the
+            // tile. Closing on the focus→report transition mirrors "click away closes it"
+            // — the in-host pointer path can't see a click outside the visual's iframe.
+            const leftFocusMode = this.prevIsInFocus && !options.isInFocus;
+            this.prevIsInFocus = !!options.isInFocus;
+            if (leftFocusMode && this.toolbar.isOpen()) this.toolbar.close();
 
             // Fade the labels in only when the graph data actually changed (dataChanged) —
             // NOT on a settings-echo update() or a resize, which would re-flash the always-
@@ -1097,7 +1104,7 @@ export class Visual implements IVisual {
             // pill steps clear of both. The action bar is independent of the gear's show flag.
             const gearCorner = s.toolbar.show.value ? resolveCorner(gearCornerPref as CornerPref, "br") : null;
             const actionBar = s.toolbar.actions.value;
-            this.viewToggle.place(viewCorner, gearAtBr, s.branding.show.value, { gearCorner, actionBar });
+            this.viewToggle.place(viewCorner, gearAtBr, this.brandingVisible(), { gearCorner, actionBar });
             this.viewToggle.show();
         } else {
             if (this.viewMode !== "graph") { this.viewMode = "graph"; this.viewToggle.set("graph"); }
@@ -2905,7 +2912,7 @@ export class Visual implements IVisual {
                 }, st.width, legendCorner, nearInset);
             }
         }
-        if (s.branding.show.value && !smallTile) {
+        if (this.brandingVisible() && !smallTile) {
             this.overlayGroup.append("text")
                 .attr("x", st.width - 8).attr("y", st.height - 8)
                 .attr("text-anchor", "end")
@@ -3199,15 +3206,16 @@ export class Visual implements IVisual {
         const s = this.formattingSettings;
         const configuredMin = Math.max(1, s.nodes.minRadius.value || 4);
         const configuredMax = Math.max(configuredMin, s.nodes.maxRadius.value || 40);
-        // Automatic density/canvas sizing belongs only to the untouched default range.
-        // As soon as the author touches either endpoint, both values become an explicit
-        // range and are rendered exactly as entered. "Touched" is a value-independent
-        // signal (NG-239): a persisted endpoint (reloaded report) OR a live gear edit not
-        // yet round-tripped through persistProperties. Comparing against the default 4/40
-        // was the bug — a deliberate Max of exactly 40 read as "untouched" and silently
-        // shrank every node, while 39 and 41 rendered full size.
-        const authored = this.radiusAuthored || this.toolbar.hasPendingEdit("nodes.minR", "nodes.maxR");
-        const autoRange = !authored;
+        // Auto size to canvas (NG-264, ON by default). In auto mode the configured
+        // Min/Max act as the 4–40px caps and both ends scale down together on small
+        // tiles / dense graphs so nodes never swamp a short canvas; on a full-size
+        // canvas the scale returns to 1 and the caps render at their authored pixels.
+        // Turning the toggle off honours the exact Min/Max regardless of size or count.
+        // Reading the live setting value (mutated optimistically by the gear bar's
+        // setLocal) means a toggle flip repaints immediately, before persistProperties
+        // echoes back — no dependence on the old value-based "authored" heuristic, which
+        // mis-read a deliberate Max of exactly 40 as untouched (the NG-239 regression).
+        const autoRange = !!s.nodes.autoSize.value;
         const responsiveScale = autoRange
             ? responsiveNodeRadiusScale(st.width, st.height) * nodeCountRadiusScale(visibleNodeCount)
             : 1;
@@ -4231,6 +4239,14 @@ export class Visual implements IVisual {
     }
 
     // --- Empty/fatal states -------------------------------------------------
+    /** Zentrix watermark visibility (NG-263 freemium): forced ON while unlicensed
+     *  (the free-tier mark), removable only once a licence is active (trial or paid).
+     *  `premium.active` is the edit-mode licence signal; viewers/read honour the saved
+     *  value (kept ON for unlicensed authors by the coercion in update()). */
+    private brandingVisible(): boolean {
+        return !this.premium.active || this.formattingSettings.branding.show.value;
+    }
+
     private renderEmptyState(reason: EmptyReason, w: number, h: number, surface: Surface): void {
         const copy: Record<EmptyReason, { title: string; detail: string }> = {
             noData: {

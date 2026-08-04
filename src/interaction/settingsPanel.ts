@@ -372,4 +372,10 @@ export class SettingsOverlay {
     isOpen(): boolean {
         return this.bar.isOpen();
     }
+
+    /** Collapse the bar (and any open popover) — e.g. when the visual leaves focus mode
+     *  so a panel opened on the large canvas doesn't linger over the small report tile. */
+    close(): void {
+        this.bar.close();
+    }
 }
