@@ -5,9 +5,9 @@
         "guid": "zentrixNetworkGraph7F3A21C9D4B84E0FA1C6E2B5D8091A3E",
         "visualClassName": "Visual",
         "version": "1.0.0.0",
-        "description": "An enterprise network/relationship graph with a deterministic, pinnable layout — the graph that stays put. Clustering, exploration and scale to come.",
+        "description": "A network & relationship graph with a deterministic, pinnable layout that stays put. Force, tree/org-chart and cluster layouts, Louvain community detection, guided exploration, and in-sandbox insights — all offline in the Power BI sandbox.",
         "supportUrl": "https://zentrixstudio.in/support",
-        "gitHubUrl": "https://github.com/Zentrix-Studio/Network-Graph"
+        "gitHubUrl": "https://github.com/Zentrix-Studio/Network-graph"
     },
     "apiVersion": "5.11.0",
     "author": {
