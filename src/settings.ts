@@ -100,6 +100,10 @@ class NodesCard extends Card {
             item("centrality", "Importance"), item("uniform", "Same size")],
         value: item("degree", "Degree"),
     });
+    // Auto-fit node radii to the canvas (NG-264). ON by default: the Min/Max below act
+    // as the 4–40px caps and the visual scales the range down on small tiles / dense
+    // graphs so nodes never swamp a short canvas. OFF: the Min/Max are honoured exactly.
+    autoSize = new ToggleSwitch({ name: "autoSize", displayName: "Auto size to canvas", value: true });
     minRadius = new NumUpDown({ name: "minRadius", displayName: "Min radius", value: 4 });
     maxRadius = new NumUpDown({ name: "maxRadius", displayName: "Max radius", value: 40 });
     sizeScale = new NumUpDown({ name: "sizeScale", displayName: "Size scale %", value: 100 });
@@ -197,7 +201,7 @@ class NodesCard extends Card {
 
     name = "nodes";
     displayName = "Nodes";
-    slices = [this.sizeBy, this.minRadius, this.maxRadius, this.sizeScale, this.shape, this.style,
+    slices = [this.sizeBy, this.autoSize, this.minRadius, this.maxRadius, this.sizeScale, this.shape, this.style,
         this.fillPattern, this.fillPatternMode, this.fillPatternL0, this.fillPatternL1,
         this.fillPatternL2, this.fillPatternL3, this.fillPatternL4, this.icon,
         this.iconMode, this.iconL0, this.iconL1, this.iconL2, this.iconL3, this.iconL4,

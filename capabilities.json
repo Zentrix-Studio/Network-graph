@@ -257,6 +257,11 @@
                         ]
                     }
                 },
+                "autoSize": {
+                    "type": {
+                        "bool": true
+                    }
+                },
                 "minRadius": {
                     "type": {
                         "numeric": true
