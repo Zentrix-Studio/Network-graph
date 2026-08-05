@@ -9,6 +9,7 @@
     "package": "pbiviz package",
     "audit": "npm audit --audit-level=low",
     "lint": "eslint . --max-warnings=0",
+    "eslint": "npx eslint . --ext .js,.jsx,.ts,.tsx",
     "test": "jest",
     "spike": "npx esbuild harness/spike.ts --bundle --outfile=harness/spike.js"
   },
