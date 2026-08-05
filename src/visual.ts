@@ -703,9 +703,11 @@ export class Visual implements IVisual {
             // Viewers-free enforcement: the gate only ever bites in edit/authoring
             // mode (ViewMode.Edit / InFocusEdit); Reading view always fail-opens.
             this.premium.refresh(options.viewMode != null && options.viewMode !== 0);
-            // No forced watermark (NG-271): the base tier is the free path once the trial
-            // ends, and Microsoft forbids watermarks on free features. The Zentrix mark is a
-            // plain author-controlled toggle now, never coerced by licence state.
+            // Licence watermark (NG-272, CEO 2026-08-05): coerce the Zentrix mark ON while
+            // unlicensed so an unlicensed author can't persist it off (a licence removes the
+            // coercion and the Format-pane toggle becomes editable). Allowed as a licence
+            // watermark on a paid product used without a valid licence.
+            if (!this.premium.active) this.formattingSettings.branding.show.value = true;
 
             // Progressive data loading (T11). The table mapping windows rows at 30k per
             // segment; when the host reports another segment (`metadata.segment`) and we
@@ -4310,11 +4312,13 @@ export class Visual implements IVisual {
     }
 
     // --- Empty/fatal states -------------------------------------------------
-    /** Zentrix watermark visibility (NG-271): a plain author-controlled toggle, no longer
-     *  coupled to licence state (no forced watermark — the base tier is free, and Microsoft
-     *  forbids watermarks on free features). */
+    /** Zentrix mark as a LICENCE WATERMARK (NG-272, CEO 2026-08-05): forced ON for unlicensed
+     *  use (free / trial-ended), removable only once a licence is Active. `premium.active` is
+     *  the edit-mode licence signal (viewers/read + fail-open keep it true, honouring the saved
+     *  value). Microsoft allows watermarks on a paid product used without a valid licence — this
+     *  is a licence watermark, not a free-tier feature mark. */
     private brandingVisible(): boolean {
-        return this.formattingSettings.branding.show.value;
+        return !this.premium.active || this.formattingSettings.branding.show.value;
     }
 
     private renderEmptyState(reason: EmptyReason, w: number, h: number, surface: Surface): void {
@@ -4385,9 +4389,10 @@ export class Visual implements IVisual {
     }
 
     public getFormattingModel(): powerbi.visuals.FormattingModel {
-        // NG-271: the Zentrix watermark toggle is a plain author control (no forced watermark,
-        // no licence coupling) — the base tier is free and Microsoft forbids watermarks on
-        // free features.
+        // Licence watermark (NG-272): disable (grey) the "Show Zentrix mark" toggle while
+        // unlicensed so it can't be turned off; a licence re-enables it. The render also forces
+        // it on (brandingVisible) and update() coerces the value.
+        this.formattingSettings.branding.show.disabled = !this.premium.active;
         return this.formattingSettingsService.buildFormattingModel(this.formattingSettings);
     }
 }
