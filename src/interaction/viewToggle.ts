@@ -74,10 +74,17 @@ export class ViewToggle {
     private surface: Surface | null = null;
     /** Which non-graph segments are currently offered (graph is always on). */
     private enabled: Record<ViewKind, boolean> = { graph: true, table: true, insight: false };
-    /** Reduced mode (NG-271): after the trial ends, the non-graph segments stay VISIBLE but
-     *  greyed and can't be selected — clicking one fires `onLockedClick` (the upgrade banner). */
-    private locked = false;
-    /** Fired when a locked (post-trial) non-graph segment is clicked. Set by the visual. */
+    /** PER-SEGMENT capability lock (NG-274): a locked segment stays VISIBLE but greyed and
+     *  can't be selected or cycled to — clicking it fires `onLockedClick` (the upgrade
+     *  banner). Used to show Insight as a disabled Pro teaser on the free tier while Table
+     *  (a free feature) stays fully usable. Graph is never locked. */
+    private locked: Record<ViewKind, boolean> = { graph: false, table: false, insight: false };
+    /** Hover-tooltip text shown on a locked segment ("… is a Pro feature — start your free
+     *  30-day trial …"). The predefined host banner (`notifyFeatureBlocked`) is invisible in
+     *  Desktop and no-ops on fail-open, so this in-visual tooltip is what the user actually
+     *  sees explaining WHY the segment is disabled. */
+    private lockReason = "";
+    /** Fired when a locked (Pro-gated) non-graph segment is clicked. Set by the visual. */
     onLockedClick: (() => void) | null = null;
 
     constructor(host: HTMLElement, private onToggle: (next: ViewKind) => void) {
@@ -102,7 +109,7 @@ export class ViewToggle {
         // old one-button toggle semantics for keyboard/automation callers.
         this.root.onclick = (e) => {
             e.stopPropagation();
-            if (this.locked) { this.onLockedClick?.(); return; }
+            // Advance to the next SELECTABLE view (locked teasers are skipped by cycle()).
             this.select(this.nextEnabled(this.kind));
         };
 
@@ -138,15 +145,16 @@ export class ViewToggle {
         b.appendChild(t);
         b.onclick = (e) => {
             e.stopPropagation();
-            if (this.locked && kind !== "graph") { this.onLockedClick?.(); return; }
+            if (this.locked[kind]) { this.onLockedClick?.(); return; }
             this.select(kind);
         };
         this.root.appendChild(b);
         return b;
     }
 
-    /** Ordered list of the currently-enabled kinds (graph always first). */
-    private cycle(): ViewKind[] { return ORDER.filter((k) => this.enabled[k]); }
+    /** Ordered list of the currently-SELECTABLE kinds (enabled and not locked; graph
+     *  always first). Locked teasers are visible but never cycled to. */
+    private cycle(): ViewKind[] { return ORDER.filter((k) => this.enabled[k] && !this.locked[k]); }
 
     /** The next enabled view after `from`, wrapping around. */
     private nextEnabled(from: ViewKind): ViewKind {
@@ -168,10 +176,14 @@ export class ViewToggle {
         this.reflect();
     }
 
-    /** Reduced mode (NG-271): keep the pill and its segments VISIBLE but grey the non-graph
-     *  ones and block selection (a click fires `onLockedClick`). Graph stays fully usable. */
-    setLocked(locked: boolean): void {
-        this.locked = locked;
+    /** Per-segment capability lock (NG-274): keep the named segments VISIBLE but grey them
+     *  and block selection (a click fires `onLockedClick`); omitted segments stay usable.
+     *  Graph is never locked. */
+    setLocked(locked: Partial<Record<ViewKind, boolean>>, reason = ""): void {
+        this.locked = { graph: false, table: !!locked.table, insight: !!locked.insight };
+        this.lockReason = reason;
+        // If the active view just became locked (e.g. a mid-session downgrade), fall back.
+        if (this.locked[this.kind]) this.kind = "graph";
         this.reflect();
     }
 
@@ -180,7 +192,7 @@ export class ViewToggle {
 
     /** Activate a segment, reflecting + firing onToggle only on a real change. */
     private select(kind: ViewKind): void {
-        if (!this.enabled[kind] || kind === this.kind) return;
+        if (!this.enabled[kind] || this.locked[kind] || kind === this.kind) return;
         this.kind = kind;
         this.reflect();
         this.onToggle(this.kind);
@@ -207,12 +219,21 @@ export class ViewToggle {
             const fill = this.surface?.selected ?? accent;
             seg.style.background = active ? fill : "transparent";
             seg.style.color = active ? "#FFFFFF" : (this.surface?.fg ?? "#15161E");
-            // Reduced mode (NG-271): grey the non-graph segments (greyed, not hidden) and
-            // mark them disabled — the click handlers already route to onLockedClick.
-            const greyed = this.locked && kind !== "graph";
+            // Locked teaser (NG-274): grey the segment (greyed, not hidden) and mark it
+            // disabled — its click handler routes to onLockedClick (the upgrade banner). A
+            // hover tooltip (`title`) + aria-label carry the "Pro feature" reason so the user
+            // sees WHY it's disabled without relying on the host banner (invisible in Desktop).
+            const greyed = this.locked[kind];
             seg.style.opacity = greyed ? "0.4" : "1";
             seg.style.cursor = greyed ? "not-allowed" : "pointer";
             seg.setAttribute("aria-disabled", greyed ? "true" : "false");
+            if (greyed && this.lockReason) {
+                seg.title = this.lockReason;
+                seg.setAttribute("aria-label", `${kind} view. ${this.lockReason}`);
+            } else {
+                seg.removeAttribute("title");
+                seg.setAttribute("aria-label", `Switch to ${kind} view`);
+            }
         }
     }
 

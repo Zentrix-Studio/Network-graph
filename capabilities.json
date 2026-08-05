@@ -1768,6 +1768,15 @@
                 }
             }
         },
+        "colorStore": {
+            "properties": {
+                "data": {
+                    "type": {
+                        "text": true
+                    }
+                }
+            }
+        },
         "annotations": {
             "properties": {
                 "show": {

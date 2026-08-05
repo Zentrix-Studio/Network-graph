@@ -81,8 +81,8 @@ export interface GraphData {
     hasTime: boolean;
     /** Non-null when the row window was capped — drives the "showing N of M" note. */
     truncated: { shownRows: number; totalRows: number } | null;
-    /** Free-tier node cap (NG-266): set when an unlicensed session is limited to N nodes.
-     *  `shown` = nodes rendered, `total` = nodes in the full data. Null when uncapped/licensed. */
+    /** Node cap: set when `maxNodes` limits the graph to N nodes. `shown` = nodes rendered,
+     *  `total` = nodes in the full data. Null when uncapped (the default). */
     nodeCap?: { shown: number; total: number } | null;
     /** Inbound cross-highlight (another visual filtered THIS graph in Highlight mode):
      *  per-edge match flag parallel to `edges`. true = the edge is in the highlighted

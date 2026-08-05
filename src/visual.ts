@@ -62,6 +62,7 @@ import {
     applySelectionDim, applyHoverEmphasis, applyExploreMask, applyPathEmphasis, applySearchHighlight,
 } from "./interaction/selection";
 import { EnterprisePanel } from "./interaction/enterprisePanel";
+import { LicenseGate, meetsTier } from "./interaction/license";
 import { enableNodeDrag } from "./interaction/drag";
 import { arrowDirection, pickDirectionalNeighbor } from "./interaction/keyboardNav";
 import { enableLasso } from "./interaction/lasso";
@@ -76,7 +77,6 @@ import { buildNodesCsv, buildEdgesCsv, buildNodeRows, buildEdgeRows, NodeCsvInpu
 import { buildPdfBase64, buildWorkbookBase64 } from "./interaction/exportFiles";
 import { captureVisualSnapshot } from "./interaction/exportSnapshot";
 import { SettingsOverlay, SettingsState } from "./interaction/settingsPanel";
-import { PremiumGate } from "./interaction/license";
 import { ZoomController } from "./interaction/zoom";
 import { renderSummaryTable } from "./render/summaryTable";
 import { buildClusterGraph } from "./model/clusterGraph";
@@ -102,13 +102,6 @@ function round2(n: number): number { return Math.round(n * 100) / 100; }
 /** Short, deliberate hierarchy transition: long enough to read, short enough that
  *  repeated exploration still feels direct. */
 const FOLD_MOTION_MS = 260;
-
-/** Reduced-mode upgrade message (NG-271), shown via Power BI's predefined `notifyFeatureBlocked`
- *  banner when an author interacts with a disabled control after the 30-day trial ends. Report
- *  viewers keep full access for free, so this only ever fires in unlicensed edit mode. */
-const REDUCED_MODE_MSG =
-    "Your 30-day free trial has ended. Subscribe to re-enable the gear, advanced settings and "
-    + "analytical views. The graph still works, and report viewers keep full access for free.";
 
 /** Stable edge identities for refresh enter/update/exit, including parallel edges. */
 function motionEdgeKeys(model: GraphModel): string[] {
@@ -262,6 +255,15 @@ export class Visual implements IVisual {
     private notes = new NoteStore();
     private noteEditor!: NoteEditor;
     private pendingNotes: string | null = null;
+    // Gear colour persistence (NG-273). The host silently DROPS a structural `fill`
+    // written via persistProperties — it only durably saves ValueTypeDescriptor
+    // primitives (text/number/bool/enum). So every gear colour is persisted instead as
+    // ONE text JSON blob under the non-card `colorStore` object and re-hydrated onto the
+    // ColorPicker slices in update(), exactly like the notes store. `pendingColors`
+    // guards an in-flight write (drop it once the host echoes the same JSON back);
+    // `lastColorBlob` is the canonical snapshot so an ordinary rerender never re-persists.
+    private pendingColors: string | null = null;
+    private lastColorBlob = "";
     private toolbar: SettingsOverlay;
     /** UAT-7: a gear click on a small tile switched the report to focus mode; the
      *  bar auto-opens when the in-focus update() arrives. */
@@ -269,12 +271,15 @@ export class Visual implements IVisual {
     /** Previous update()'s focus-mode state, so we can detect the focus→report exit and
      *  collapse a settings panel that was opened on the large focus canvas (NG-265). */
     private prevIsInFocus = false;
-    private premium: PremiumGate;
-    /** Edge-trigger for the freemium "feature blocked" banner (NG-264). */
-    private premiumNag = false;
     private zoom: ZoomController;
     private enterprisePanel: EnterprisePanel;
     private rulesPanel: RulesPanel;
+    /** Three-tier capability gate (free / pro / enterprise). Fail-open to the top
+     *  tier; enforced in edit mode only (viewers are free). Never blocks rendering. */
+    private license: LicenseGate;
+    /** Edge-trigger for the predefined "feature needs a licence" banner so it isn't
+     *  re-raised on every repaint. */
+    private licenseNag = false;
 
     /** Conditional-formatting rules (R-cf), parsed from the persisted blob and edited
      *  via the Rules panel. Applied in the colour accessor. */
@@ -493,7 +498,6 @@ export class Visual implements IVisual {
             () => this.beginAuthoringChange(),
             () => this.commitAuthoringChange(),
         );
-        this.premium = new PremiumGate(this.host, () => this.rerenderFromSettings());
         this.enterprisePanel = new EnterprisePanel(options.element, {
             onExploreFocus: (key) => { this.setExploreFocus(key); this.rerenderFromSettings(); },
             onExploreHops: (h) => { this.exploreHops = h; this.rerenderFromSettings(); },
@@ -524,6 +528,9 @@ export class Visual implements IVisual {
             // "Rules editor": rules remain active, only the editor is hidden.
             this.toolbar.setValue("cf.show", false);
         });
+        // Capability gate. onResolved repaints once the async licence check lands so a
+        // tier upgrade/downgrade takes effect without waiting for the next host update().
+        this.license = new LicenseGate(this.host, () => this.rerenderFromSettings());
 
         // Under-SVG canvas for the large-graph fast path. Click-through (pointer-events
         // none) so the SVG on top owns all interaction — in canvas mode the SVG has no
@@ -646,6 +653,9 @@ export class Visual implements IVisual {
         this.events.renderingStarted(options);
         try {
             const dataView: DataView | undefined = options.dataViews && options.dataViews[0];
+            // Re-check the capability tier. Fail-open and edit-mode only — viewers are
+            // free, so this only ever bites an unlicensed author (viewMode !== View=0).
+            this.license.refresh(options.viewMode != null && options.viewMode !== 0);
             this.formattingSettings = this.formattingSettingsService.populateFormattingSettingsModel(
                 VisualFormattingSettingsModel, dataView);
             // Guard against a persisted value whose property type changed (e.g. an old
@@ -653,7 +663,15 @@ export class Visual implements IVisual {
             // leaves such a dropdown's value undefined, which would crash every `.value.value`
             // read. Reset any dropdown with an invalid/missing value to its first item.
             coerceDropdowns(this.formattingSettings);
+            // Re-hydrate gear colours from the durable text store — the host drops the
+            // per-property `fill` values populate just read, so this restores them (NG-273).
+            this.hydrateColors(dataView);
             this.migrateLegacyBoldLabels(dataView);
+            // Capability gate (CEO 2026-08-05): force every locked Pro/Enterprise setting
+            // to its off/safe value in the live model so render, computation, and the gear
+            // all agree. Display-only (never persisted); an upgrade recovers on the next
+            // populate. Nothing here is touched on the free tier's cosmetic controls.
+            this.applyTierGate();
 
             const palette = this.host.colorPalette;
             const hc = !!palette.isHighContrast;
@@ -700,14 +718,6 @@ export class Visual implements IVisual {
                 return;
             }
             this.landing.hide();
-            // Viewers-free enforcement: the gate only ever bites in edit/authoring
-            // mode (ViewMode.Edit / InFocusEdit); Reading view always fail-opens.
-            this.premium.refresh(options.viewMode != null && options.viewMode !== 0);
-            // Licence watermark (NG-272, CEO 2026-08-05): coerce the Zentrix mark ON while
-            // unlicensed so an unlicensed author can't persist it off (a licence removes the
-            // coercion and the Format-pane toggle becomes editable). Allowed as a licence
-            // watermark on a paid product used without a valid licence.
-            if (!this.premium.active) this.formattingSettings.branding.show.value = true;
 
             // Progressive data loading (T11). The table mapping windows rows at 30k per
             // segment; when the host reports another segment (`metadata.segment`) and we
@@ -745,6 +755,10 @@ export class Visual implements IVisual {
             const storedRules = readStoredRules(dataView!);
             if (this.pendingRules != null && storedRules === this.pendingRules) this.pendingRules = null;
             this.cfRules = parseRules(this.pendingRules != null ? this.pendingRules : storedRules);
+            // Conditional-formatting rules are a Pro feature: existing rules keep colouring
+            // even with the editor hidden, so gating the panel alone isn't enough — drop the
+            // applied rules entirely on the free tier.
+            if (!this.license.allows("rules")) this.cfRules = [];
 
             // Read the persisted legend fold (NG-142), with the same optimistic-clobber
             // guard: honour a just-made toggle until persistProperties echoes it back.
@@ -752,22 +766,24 @@ export class Visual implements IVisual {
             if (this.pendingLegendCollapsed != null && storedLegendCollapsed === this.pendingLegendCollapsed) this.pendingLegendCollapsed = null;
             this.legendCollapsed = this.pendingLegendCollapsed != null ? this.pendingLegendCollapsed : storedLegendCollapsed;
 
-            // Build the graph (pure) with the honest render budget (scale mode E1).
-            const maxEdges = this.maxEdgeBudget();
+            // Build the graph (pure) with the honest render budget (scale mode E1),
+            // clamped to the tier's data caps. Free tier is capped at FREE_NODE_CAP /
+            // FREE_EDGE_CAP with an honest "showing N of M" notice; Enterprise (fullGraph)
+            // is uncapped. A capped graph never blanks or errors — it truncates visibly.
+            const maxEdges = Math.min(this.maxEdgeBudget(), this.license.edgeCap);
             const data0 = buildGraphData(dataView!, maxEdges, {
                 mergeDuplicates: this.formattingSettings.nodes.mergeDuplicates.value,
-                // Free tier is capped at 500 nodes (NG-266); Pro (licensed) gets the full network.
-                maxNodes: this.premium.active ? Infinity : 500,
+                maxNodes: this.license.nodeCap,
             });
             const model0 = buildGraphModel(data0.edges, data0.labelByKey);
 
-            // Clustering (Enterprise E2), gated by the premium licence (fail-open).
-            // Also computed when colour-by-cluster is selected, so the palette can use it,
-            // and when "Group by cluster" wants the grouping force even with hulls hidden.
+            // Clustering (Enterprise E2). Also computed when colour-by-cluster is selected,
+            // so the palette can use it, and when "Group by cluster" wants the grouping force
+            // even with hulls hidden.
             const cl = this.formattingSettings.clusters;
             const colorByCluster = this.formattingSettings.colors.mode.value.value === "cluster";
-            const clusterOn = this.premium.active && (cl.show.value || colorByCluster
-                || cl.collapse.value || cl.groupByCluster.value);
+            const clusterOn = cl.show.value || colorByCluster
+                || cl.collapse.value || cl.groupByCluster.value;
             const clusterMode = (cl.clusterBy.value.value as ClusterMode) || "auto";
             const community0 = clusterOn
                 ? resolveClusters(model0, (i) => (data0.attrs[i]?.category ?? null), {
@@ -791,9 +807,12 @@ export class Visual implements IVisual {
             const neighbors = neighborIndex(model);
 
             // Centrality (Enterprise moat) — computed once here, reused for size/colour/
-            // ranking/tooltip. Gated by the premium licence (fail-open).
-            const cMetric = this.formattingSettings.centrality.metric.value.value as CentralityMetric;
-            const centralityMetric: CentralityMetric = this.premium.active ? cMetric : "none";
+            // ranking/tooltip.
+            // Centrality is a Pro feature — the metric is forced to "none" for free (the
+            // gate coerces the dropdown too, this is the belt-and-suspenders compute guard).
+            const centralityMetric: CentralityMetric = this.license.allows("centrality")
+                ? (this.formattingSettings.centrality.metric.value.value as CentralityMetric)
+                : "none";
             const centrality = centralityMetric !== "none" ? computeCentrality(model, centralityMetric) : null;
 
             this.lastRender = { model, data, idsByNode, idsByEdge, neighbors, community, centrality, centralityMetric, width, height, dark, hc };
@@ -824,11 +843,10 @@ export class Visual implements IVisual {
             this.enterprisePanel.setTheme(surface);
             this.enterprisePanel.setNodes(keys);
             this.enterprisePanel.setViewport(width, height);
-            const ep = this.premium.active;
             this.enterprisePanel.configure(
-                ep && this.formattingSettings.find.show.value,
-                ep && this.formattingSettings.explore.show.value,
-                ep && this.formattingSettings.path.show.value);
+                this.formattingSettings.find.show.value,
+                this.formattingSettings.explore.show.value,
+                this.formattingSettings.path.show.value);
 
             // Rules editor (R-cf) — core feature. The rules colour nodes whenever they
             // exist; the panel is just the editor, shown by the cformat.show toggle.
@@ -861,12 +879,13 @@ export class Visual implements IVisual {
                 hasTime: data0.hasTime,
                 hasTooltips: data0.hasTooltips,
                 hasGeo: data0.attrs.some((attr) => attr.lat != null && attr.lon != null),
-                // Licence state for the gear's `@licensed` gate (NG-268): Pro fields dim with a
-                // "start your trial" reason while unlicensed. Fail-open paths keep active=true.
-                licensed: this.premium.active,
                 canvasAvailable: !!this.ctx,
                 nodeCount: model.nodes.length,
                 edgeCount: model.links.length,
+                // Tier flags for the gear's `@pro` / `@ent` gating (dim locked controls
+                // with an upgrade reason). Fail-open sets both true.
+                pro: meetsTier(this.license.tier, "pro"),
+                ent: meetsTier(this.license.tier, "enterprise"),
             });
             // The quick-action toolbar owns the top-right corner; tell the gear so it steps
             // left of it instead of overlapping when the author pins the gear top-right (NG-136).
@@ -885,19 +904,12 @@ export class Visual implements IVisual {
             const needsFocusForSettings = !options.isInFocus
                 && (width < 640 || height < 400);
             this.toolbar.setOpenGate(
-                !this.premium.active
-                    // Reduced mode (NG-271): after the trial the gear is disabled — a click is
-                    // consumed into Power BI's predefined upgrade banner instead of opening the
-                    // settings. Takes priority over the small-tile focus-mode gate.
-                    ? () => { this.premium.blockFeature(REDUCED_MODE_MSG); return true; }
-                    : needsFocusForSettings ? () => {
-                        try { this.host.switchFocusModeState(true); } catch { return false; }
-                        this.pendingFocusOpen = true;
-                        return true;
-                    } : null,
+                needsFocusForSettings ? () => {
+                    try { this.host.switchFocusModeState(true); } catch { return false; }
+                    this.pendingFocusOpen = true;
+                    return true;
+                } : null,
             );
-            // Reduced mode (NG-271): grey the gear icon (visible, not hidden) once the trial ends.
-            this.toolbar.setLocked(!this.premium.active);
             if (options.isInFocus && this.pendingFocusOpen) {
                 this.pendingFocusOpen = false;
                 this.toolbar.forceOpen();
@@ -977,6 +989,75 @@ export class Visual implements IVisual {
         this.rerenderFromSettings();
     }
 
+    /** Every ColorPicker slice in the live model, keyed `${card.name}.${slice.name}`.
+     *  Walked from the formatting model itself so it always covers every colour picker
+     *  (node, edge, label, parent, gradient stop, cluster, …) with no hand-maintained list. */
+    private colorPickerSlices(): { key: string; slice: { value: { value?: string } } }[] {
+        const out: { key: string; slice: { value: { value?: string } } }[] = [];
+        const model = this.formattingSettings;
+        if (!model) return out;
+        for (const card of model.cards as unknown as { name: string; slices?: { type?: string; name: string; value: { value?: string } }[] }[]) {
+            for (const slice of card.slices ?? []) {
+                if (slice.type === "ColorPicker") out.push({ key: `${card.name}.${slice.name}`, slice });
+            }
+        }
+        return out;
+    }
+
+    /** Snapshot every ColorPicker value as a stable JSON blob (key → hex). Empty
+     *  string is kept (a blank "auto" colour is meaningful) so it round-trips too. */
+    private serializeColors(): string {
+        const blob: Record<string, string> = {};
+        for (const { key, slice } of this.colorPickerSlices()) blob[key] = String(slice.value?.value ?? "");
+        return JSON.stringify(blob);
+    }
+
+    /** Apply a colour blob onto the live ColorPicker slices. Unknown keys are ignored
+     *  (schema drift-safe); slices absent from the blob keep their populated default. */
+    private applyColors(json: string): void {
+        let blob: Record<string, unknown>;
+        try { blob = JSON.parse(json) as Record<string, unknown>; } catch { return; }
+        for (const { key, slice } of this.colorPickerSlices()) {
+            if (Object.prototype.hasOwnProperty.call(blob, key)) slice.value = { value: String(blob[key] ?? "") };
+        }
+    }
+
+    /** Re-hydrate gear colours from the durable text store (NG-273). Called in update()
+     *  right after populateFormattingSettingsModel — the host has dropped the structural
+     *  `fill` values, so without this every gear colour reverts to default on refresh /
+     *  page change / reopen. Mirrors loadNotes' in-flight guard: while our own write is
+     *  unconfirmed, keep applying it rather than the stale (or absent) stored value. */
+    private hydrateColors(dataView: DataView | undefined): void {
+        if (!this.formattingSettings) return;
+        const obj = dataView?.metadata?.objects?.colorStore as { data?: unknown } | undefined;
+        const stored = typeof obj?.data === "string" ? obj.data : "";
+        if (this.pendingColors != null) {
+            if (stored === this.pendingColors) this.pendingColors = null; // host confirmed our write
+            else { this.applyColors(this.pendingColors); this.lastColorBlob = this.serializeColors(); return; }
+        }
+        if (stored) this.applyColors(stored);
+        // Canonical baseline so an ordinary optimistic rerender never re-persists (only a
+        // real colour edit, which changes serializeColors(), trips maybePersistColors).
+        this.lastColorBlob = this.serializeColors();
+    }
+
+    /** After any optimistic repaint, persist the colour blob IF a ColorPicker changed.
+     *  This is the only durable write path for gear colours (the per-property `fill`
+     *  persist the settings bar also fires is silently dropped by the host). A global or
+     *  per-card Reset lands here too — colorStore is NOT a card, so the gear's
+     *  removeObject-over-cards never touches it; rewriting the now-default blob is what
+     *  makes Reset actually clear a custom colour. */
+    private maybePersistColors(): void {
+        if (!this.formattingSettings) return;
+        const blob = this.serializeColors();
+        if (blob === this.lastColorBlob) return;
+        this.lastColorBlob = blob;
+        this.pendingColors = blob;
+        this.host.persistProperties({
+            merge: [{ objectName: "colorStore", selector: null, properties: { data: blob } }],
+        } as powerbi.VisualObjectInstancesToPersist);
+    }
+
     /** Open the annotation editor on a node (existing note, or a fresh one). */
     private openNoteEditor(st: RenderState, i: number): void {
         const anchor = nodeNoteKey(st.model.nodes[i]);
@@ -1015,11 +1096,79 @@ export class Visual implements IVisual {
      *  recomputed arrangement can settle from what the reader just saw. */
     private rerenderFromSettings(animateLayout = false, replayInitial = false): void {
         if (!this.lastRender) return;
+        // Re-apply the capability gate so an async tier change (or an optimistic edit)
+        // can't leave a locked feature painting on this no-host-round-trip path.
+        this.applyTierGate();
+        // Durably persist any gear colour edit that led to this repaint (NG-273). No-op
+        // unless a ColorPicker actually changed, so non-colour repaints cost nothing.
+        this.maybePersistColors();
         this.replayInitialMotion = replayInitial;
         this.pendingMotion = animateLayout ? this.captureMotionSnapshot() : null;
         this.cancelMotion();
         this.clearLayers();
         this.paint(this.lastRender, animateLayout);
+    }
+
+    /** Force every gated-and-locked setting to its off/safe value in the LIVE formatting
+     *  model, so every downstream read (render + computation) and the gear agree. This is
+     *  display-only coercion — never persisted, the same pattern `coerceDropdowns` and the
+     *  legacy watermark line used. Anything NOT touched here is free by construction.
+     *  Fail-open (top tier) leaves the whole model untouched. Two features the proposal
+     *  listed as Pro are intentionally kept FREE: hover tooltips (never gate a basic
+     *  tooltip — the "is this a real Power BI visual" test) and Pin/drag (coercing it off
+     *  would fight in-session dragging). */
+    private applyTierGate(): void {
+        const g = this.license;
+        if (g.tier === "enterprise") return; // fail-open / fully licensed → nothing to gate
+        const s = this.formattingSettings;
+        const setItem = (slice: { value: unknown; items?: { value: unknown }[] }, val: string): void => {
+            const it = slice.items?.find((i) => String(i.value) === val);
+            if (it) slice.value = it as typeof slice.value;
+        };
+        // ── Enterprise — scale + heavy analysis + deploy ──
+        if (!g.allows("clusters")) {
+            s.clusters.show.value = false;
+            s.clusters.collapse.value = false;
+            s.clusters.groupByCluster.value = false;
+            s.clusters.showHulls.value = false;
+        }
+        if (!g.allows("scale")) s.scale.fetchMore.value = false;
+        if (!g.allows("minimap")) s.scale.minimap.value = false;
+        if (!g.allows("explore")) s.explore.show.value = false;
+        if (!g.allows("path")) s.path.show.value = false;
+        if (!g.allows("temporal")) s.temporal.show.value = false;
+        if (!g.allows("annotations")) s.annotations.show.value = false;
+        if (!g.allows("geo") && String(s.layout.mode.value.value) === "geo") {
+            setItem(s.layout.mode, "force");
+            s.layout.showBasemap.value = false;
+        }
+        // ── Pro — analytics + production on small/medium graphs ──
+        if (!g.allows("centrality") && String(s.centrality.metric.value.value) !== "none") setItem(s.centrality.metric, "none");
+        if (!g.allows("communityColor")) {
+            const mode = String(s.colors.mode.value.value);
+            if (mode === "cluster" || mode === "component") setItem(s.colors.mode, "single");
+        }
+        if (!g.allows("gradientBuilder")) s.colors.customGradient.value = false;
+        if (!g.allows("insights")) s.insights.show.value = false;
+        if (!g.allows("flow")) s.edges.flow.value = false;
+        if (!g.allows("drilldown")) { s.hierarchy.foldable.value = false; s.hierarchy.drilldown.value = false; }
+        if (!g.allows("highlightFilter") && String(s.ranking.action.value.value) === "highlight") setItem(s.ranking.action, "filter");
+        if (!g.allows("rules")) s.cformat.show.value = false; // applied rules are also dropped where cfRules is built
+        if (!g.allows("icons")) { setItem(s.nodes.iconMode, "all"); s.nodes.icon.value = ""; }
+        if (!g.allows("patterns")) { setItem(s.nodes.fillPatternMode, "all"); setItem(s.nodes.fillPattern, "none"); }
+        if (!g.allows("innerLabels")) s.nodes.showValue.value = false;
+        if (!g.allows("labelBg")) s.labels.bgShow.value = false;
+        if (!g.allows("networkTooltip")) {
+            const t = String(s.tooltip.contentMode.value.value);
+            if (t === "network" || t === "combined") setItem(s.tooltip.contentMode, "business");
+        }
+        if (!g.allows("pin")) s.pin.pinned.value = false;
+        if (!g.allows("parents")) s.parents.show.value = false;
+        if (!g.allows("showFullInfo")) s.nodes.showFullInfoOnClick.value = false;
+        if (!g.allows("flowLabels")) {
+            const c = String(s.labels.content.value.value);
+            if (c === "inflow" || c === "outflow" || c === "flow") setItem(s.labels.content, "name");
+        }
     }
 
     /** Build the focus-mode restore button — an eye icon, top-right, hidden until
@@ -1063,38 +1212,9 @@ export class Visual implements IVisual {
     /** Draw the graph (or the summary table) from a render state. */
     private paint(st: RenderState, settle = false): void {
         const s = this.formattingSettings;
-        // Reduced-mode model (CEO 2026-08-05, NG-271): NOT a whole-visual lock. When the
-        // licence gate resolves inactive (edit/authoring mode, trial over / no plan), the graph
-        // STILL renders — base features + native interactions (tooltip, hover, cross-filter,
-        // context menu) — but the whole Zentrix control surface (gear, view switch, action bar)
-        // is DISABLED (greyed, not hidden) below. During the trial and once purchased (Active
-        // plan) everything is live; viewers/read view always fail-open to full. The graph
-        // degrades to the base tier via the existing per-feature gates (advanced features off
-        // after trial), consistent with "advanced features unavailable once the trial ends."
-        // Freemium feedback (NG-264): if an unlicensed author toggled on a premium feature —
-        // it's silently gated off in the render — raise Power BI's predefined "feature blocked"
-        // banner once so the toggle isn't a confusing no-op. Edge-triggered so the 10s banner
-        // doesn't re-fire on every repaint.
-        const wantsPremium = !this.premium.active && (
-            s.clusters.show.value || s.find.show.value || s.explore.show.value
-            || s.path.show.value || s.insights.show.value || s.temporal.show.value
-            || (s.centrality.metric.value.value as string) !== "none"
-            || (s.layout.mode.value.value as string) === "geo"
-            || s.hierarchy.foldable.value || s.hierarchy.drilldown.value
-            || s.scale.minimap.value);
-        if (wantsPremium && !this.premiumNag) {
-            this.premium.blockFeature(
-                "This is a Pro feature — start your free 30-day trial to unlock network analysis "
-                + "(community detection, centrality, path, insights, time), search & explore, Geo and "
-                + "advanced org-chart, minimap, and analytical table columns.");
-            this.premiumNag = true;
-        } else if (!wantsPremium) {
-            this.premiumNag = false;
-        }
         const surface = this.surfaceFor(st.dark, st.hc);
         this.rulesPanel.setAvailability({
-            centrality: this.premium.active
-                && (s.centrality.metric.value.value as CentralityMetric) !== "none",
+            centrality: (s.centrality.metric.value.value as CentralityMetric) !== "none",
         });
         // Turning the opt-in off immediately removes any open panel and forgets its
         // node so a later repaint cannot bring it back.
@@ -1143,15 +1263,19 @@ export class Visual implements IVisual {
         // legacy bottom-right dodge — LEFT of the gear when it anchors bottom-right,
         // ABOVE the Zentrix watermark, else flush in the corner.
         const tableSeg = s.summaryTable.show.value;
-        // Segment OFFERING is decoupled from licence (NG-271) so the Insight tile stays
-        // VISIBLE-but-greyed after the trial rather than vanishing; selection is what gets
-        // gated below via setLocked. Viewers/read mode (premium.active true) switch freely.
-        const insightSeg = s.insights.show.value;
+        // Insight is a Pro feature. On the free tier keep the segment VISIBLE but greyed —
+        // a disabled upsell teaser (click → upgrade banner) — rather than hiding it (NG-274).
+        // Table (summaryTable) is a free feature, so it is never locked.
+        const insightLocked = !this.license.allows("insights");
+        const insightSeg = s.insights.show.value || insightLocked;
+        const insightLockMsg = "Insights is a Pro feature — start your free 30-day trial to unlock it.";
         this.viewToggle.setSegments({ table: tableSeg, insight: insightSeg });
-        // Reduced mode: after the trial the non-graph views are greyed and unselectable; a
-        // click raises Power BI's predefined upgrade banner (never our own popup).
-        this.viewToggle.onLockedClick = () => this.premium.blockFeature(REDUCED_MODE_MSG);
-        this.viewToggle.setLocked(!this.premium.active);
+        this.viewToggle.setLocked({ insight: insightLocked }, insightLockMsg);
+        // Click also raises Power BI's predefined banner (a no-op in Desktop / on fail-open,
+        // but the real signal in the Service); the hover tooltip above is the reliable one.
+        this.viewToggle.onLockedClick = () => this.license.blockFeature(insightLockMsg);
+        // A locked Insight can never be the active view; fall the canvas back to the graph.
+        if (insightLocked && this.viewMode === "insight") this.viewMode = "graph";
         // If the current view's segment was just turned off, follow the pill back to graph.
         if (this.viewMode !== "graph" && this.viewToggle.current() === "graph") this.viewMode = "graph";
         if (this.viewToggle.hasAlternateView() && !hideChrome && !smallTile) {
@@ -1249,15 +1373,12 @@ export class Visual implements IVisual {
         // reset layout. History covers every authored visual change, while reset
         // remains specifically about node positions.
         if (s.toolbar.actions.value && !hideChrome && !smallTile) {
-            // Reduced mode (NG-271): after the trial the action bar is disabled (greyed) along
-            // with the rest of the Zentrix controls. `acts` gates every button on the licence.
-            const acts = this.premium.active;
             this.actionBar.setState(
-                acts,
-                acts && this.undoHistory.length > 0,
-                acts && this.redoHistory.length > 0,
-                acts && (s.pin.pinned.value || this.storedPositions != null),
-                acts && this.downloadService() != null,
+                true,
+                this.undoHistory.length > 0,
+                this.redoHistory.length > 0,
+                s.pin.pinned.value || this.storedPositions != null,
+                this.downloadService() != null,
             );
             this.actionBar.show();
         } else {
@@ -1277,11 +1398,7 @@ export class Visual implements IVisual {
         // timer sliders (settle/zoom/label-fade) — the fixed defaults read best and the
         // knobs had no real use — so nothing overrides those custom properties anymore.
 
-        const rawMode = (s.layout.mode.value.value as LayoutMode) ?? "force";
-        // Geo layout is Pro (NG-266): an unlicensed author falls back to force layout.
-        // (Advanced org-chart fold/drill is gated at the hierarchy build below; the basic
-        // tree layout stays free.)
-        const mode = (!this.premium.active && rawMode === "geo") ? "force" : rawMode;
+        const mode = (s.layout.mode.value.value as LayoutMode) ?? "force";
         const pinned = s.pin.pinned.value;
         // Unpinned → drop any stale saved positions so a later pin freezes fresh.
         if (!pinned) this.storedPositions = null;
@@ -1582,10 +1699,9 @@ export class Visual implements IVisual {
             const parentKeys = deriveTreeParents(st.model);
             return buildHierarchy(st.model, (i) => parentKeys[i] ?? null);
         })();
-        // Advanced org-chart (Pro, NG-266): fold/collapse + drill-down need a licence. The
-        // basic tree layout stays free; nulling `hier` here nulls `hierState`, which cascades
-        // to every fold/drill read and the click handler (canNodeActivate).
-        const hier: Hierarchy | null = this.premium.active && (hcard.foldable.value || hcard.drilldown.value)
+        // Org-chart fold/collapse + drill-down. Nulling `hier` here nulls `hierState`, which
+        // cascades to every fold/drill read and the click handler (canNodeActivate).
+        const hier: Hierarchy | null = (hcard.foldable.value || hcard.drilldown.value)
             ? dragHierarchy : null;
         if (hier && hcard.foldable.value) {
             const sig = st.model.nodes.map((n, i) =>
@@ -1863,7 +1979,7 @@ export class Visual implements IVisual {
 
         // Explore mode (E3): clicking a node focuses its ego network; re-clicking the
         // already-focused node exits (canvas-level toggle, G2-007).
-        const exploreOn = this.premium.active && s.explore.show.value;
+        const exploreOn = s.explore.show.value;
         if (exploreOn) {
             nodeSel.on("click.explore", (event: MouseEvent, i: number) => {
                 event.stopPropagation();
@@ -2389,9 +2505,9 @@ export class Visual implements IVisual {
 
     // --- Temporal / dynamic graph (NG-077) -----------------------------------
     /** Show the time controller and reveal edges up to its cursor, or hide it. Only
-     *  in the SVG path (canvas has no per-edge DOM to toggle) and when premium. */
+     *  in the SVG path (canvas has no per-edge DOM to toggle). */
     private setupTemporal(st: RenderState): void {
-        const active = this.premium.active && st.data.hasTime
+        const active = st.data.hasTime
             && this.formattingSettings.temporal.show.value && !this.canvasActive
             && !this.chromeHidden && this.formattingSettings.toolbar.showOverlays.value;
         if (!active) { this.temporal.hide(); this.temporalData = null; return; }
@@ -2645,7 +2761,7 @@ export class Visual implements IVisual {
         const kept = this.rankingAction() === "filter" ? this.rankedKeptSet(st) : null;
         const s = this.formattingSettings;
         let ego: Set<number> | null = null;
-        if (this.premium.active && (s.explore.show.value || this.insightFocusActive) && this.exploreFocus) {
+        if ((s.explore.show.value || this.insightFocusActive) && this.exploreFocus) {
             const fi = st.model.indexByKey.get(this.exploreFocus);
             if (fi !== undefined) ego = kHopSet(st.model, fi, this.exploreHops, st.neighbors);
         }
@@ -2656,7 +2772,7 @@ export class Visual implements IVisual {
     /** Active node-name search predicate, shared by SVG and Canvas emphasis. */
     private searchMatchesOf(st: RenderState): ((i: number) => boolean) | null {
         const s = this.formattingSettings;
-        if (!this.premium.active || !s.find.show.value || !this.searchTerm) return null;
+        if (!s.find.show.value || !this.searchTerm) return null;
         const term = this.searchTerm.toLowerCase();
         return (i: number): boolean => st.model.nodes[i].label.toLowerCase().includes(term);
     }
@@ -2691,7 +2807,6 @@ export class Visual implements IVisual {
     /** Explore mask (E3) and/or path highlight (E5), applied after selection dim. */
     private applyEnterpriseEmphasis(st: RenderState): void {
         const s = this.formattingSettings;
-        if (!this.premium.active) return;
 
         // Search highlight (R4): enlarge/ring matches, dim the rest.
         const searchMatches = this.searchMatchesOf(st);
@@ -2720,7 +2835,7 @@ export class Visual implements IVisual {
         }
 
         // Path: highlight the shortest path between the two picked nodes.
-        if (this.premium.active && s.path.show.value && this.pathSource && this.pathTarget) {
+        if (s.path.show.value && this.pathSource && this.pathTarget) {
             const a = st.model.indexByKey.get(this.pathSource);
             const b = st.model.indexByKey.get(this.pathTarget);
             if (a === undefined || b === undefined) return;
@@ -2818,10 +2933,10 @@ export class Visual implements IVisual {
         this.rerenderFromSettings();
     }
 
-    /** Whether the Table's analytical columns are computable now (NG-253): premium
-     *  (fail-open) and within the O(V·E) node cap shared with edge-betweenness/tooltips. */
+    /** Whether the Table's analytical columns are computable now (NG-253): within the
+     *  O(V·E) node cap shared with edge-betweenness/tooltips. */
     private tableAnalyticsAvailable(st: RenderState): boolean {
-        return this.premium.active && st.model.nodes.length <= 2000;
+        return st.model.nodes.length <= 2000;
     }
 
     /** Lazy, memoized provider for the Table's opt-in analytical columns (NG-253).
@@ -2910,7 +3025,7 @@ export class Visual implements IVisual {
         }
         if (st.data.nodeCap) {
             statusLines.push(`Showing ${st.data.nodeCap.shown.toLocaleString()} of `
-                + `${st.data.nodeCap.total.toLocaleString()} nodes — upgrade to Pro for the full network`);
+                + `${st.data.nodeCap.total.toLocaleString()} nodes`);
         }
         const statusBottom = renderGraphStatus(this.overlayGroup, statusLines, st.width, surface);
         // Drill-down breadcrumb — redrawn here so it survives zoom/pan (overlay is cleared each time).
@@ -2920,7 +3035,7 @@ export class Visual implements IVisual {
         // Minimap is a navigation aid for a zoomed/panned graph — only useful once
         // the user has zoomed in. On the default fit view it's clutter (and would sit
         // under the gear), so gate it on zoom.
-        if (this.premium.active && s.scale.minimap.value && st.geo && this.zoom.get().k > 1.05) {
+        if (s.scale.minimap.value && st.geo && this.zoom.get().k > 1.05) {
             renderMinimap(this.overlayGroup, st.geo.px, this.zoom.get(), st.width, st.height, surface);
         }
         const showCategoryLegend = s.colors.showLegend.value;
@@ -4312,13 +4427,9 @@ export class Visual implements IVisual {
     }
 
     // --- Empty/fatal states -------------------------------------------------
-    /** Zentrix mark as a LICENCE WATERMARK (NG-272, CEO 2026-08-05): forced ON for unlicensed
-     *  use (free / trial-ended), removable only once a licence is Active. `premium.active` is
-     *  the edit-mode licence signal (viewers/read + fail-open keep it true, honouring the saved
-     *  value). Microsoft allows watermarks on a paid product used without a valid licence — this
-     *  is a licence watermark, not a free-tier feature mark. */
+    /** Whether the Zentrix brand mark is shown — a plain author toggle. */
     private brandingVisible(): boolean {
-        return !this.premium.active || this.formattingSettings.branding.show.value;
+        return this.formattingSettings.branding.show.value;
     }
 
     private renderEmptyState(reason: EmptyReason, w: number, h: number, surface: Surface): void {
@@ -4389,10 +4500,6 @@ export class Visual implements IVisual {
     }
 
     public getFormattingModel(): powerbi.visuals.FormattingModel {
-        // Licence watermark (NG-272): disable (grey) the "Show Zentrix mark" toggle while
-        // unlicensed so it can't be turned off; a licence re-enables it. The render also forces
-        // it on (brandingVisible) and update() coerces the value.
-        this.formattingSettings.branding.show.disabled = !this.premium.active;
         return this.formattingSettingsService.buildFormattingModel(this.formattingSettings);
     }
 }

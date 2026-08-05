@@ -360,6 +360,18 @@ const depOpt = (
     disabledIf: (get: (key: string) => unknown) => boolean,
     disabledReason: string,
 ): SBOption => ({ value, label, disabledIf, disabledReason });
+
+/* Capability-tier gating (CEO 2026-08-05). The gear dims a locked control and shows one
+   of these reasons; the real enforcement is the coercion pass in visual.ts. `@pro`/`@ent`
+   are data flags fed by the host (fail-open sets both true, so nothing dims). During
+   Microsoft's 30-day trial the top tier is active, so every control is live. */
+const PRO_REASON = "Pro feature — start your free 30-day trial to unlock it.";
+const ENT_REASON = "Enterprise feature — start your free 30-day trial to unlock it.";
+// Lock ONLY when the host explicitly reports the tier as unavailable. An absent flag
+// (before the first update(), or a host that never sets it) must FAIL OPEN, matching
+// the gate's fail-open posture — never dim a control just because the flag is missing.
+const proLocked = (g: (key: string) => unknown): boolean => g("@pro") === false;
+const entLocked = (g: (key: string) => unknown): boolean => g("@ent") === false;
 const PATTERN_OPTIONS: [string, string][] = [
     opt("none", "Solid"), opt("dots", "Dots"), opt("rings", "Circles"),
     opt("diagonal", "Diagonal"), opt("crosshatch", "Hatch"), opt("grid", "Grid"),
@@ -439,18 +451,13 @@ const paletteFilter = (g: (key: string) => unknown, _id: string, pal?: SBPalette
     return true;
 };
 
-/** Reason shown when a Pro feature's control is dimmed on the free tier (NG-268).
- *  Paired with `dimIf: (g) => !g("@licensed")` so the gear greys it + shows this on hover. */
-const PRO_REASON = "Premium — start your free 30-day trial to unlock it.";
-
 export const SB_CATS: SBCategory[] = [
     { id: "layout", name: "Layout", flat: true, subs: [{ id: "layout", kind: "fields", fields: [
         { control: "tiles", label: "Mode", key: "layout.mode", tileColumns: 3,
             options: [opt("force", "Force"), opt("circle", "Concentric"), opt("ring", "Circular"),
                 opt("grid", "Grid"), opt("tree", "Tree"),
-                { value: "geo", label: "Geo", disabledIf: (g) => !g("@licensed") || !g("@hasGeo"),
-                    disabledReasonFn: (g) => !g("@licensed") ? PRO_REASON
-                        : "Add valid Latitude and Longitude data to enable Geo layout." }],
+                { value: "geo", label: "Geo", disabledIf: (g) => entLocked(g) || !g("@hasGeo"),
+                    disabledReasonFn: (g) => entLocked(g) ? ENT_REASON : "Add valid Latitude and Longitude data to enable Geo layout." }],
             tileIcons: { force: "force", circle: "concentric", ring: "circular", grid: "grid", tree: "tree", geo: "geo" },
             info: "Force reveals general network clusters. Concentric puts the strongest hub in the centre and progressively lower-connectivity nodes on grouped outer rings. Circular places every node on a single ring in a crossing-minimising order. Grid arranges nodes on a stable square grid, hubs first. Tree uses the original layered hierarchy, chooses the most connected root when no Node parent is bound, and defaults to maximum link curvature (override it in Edges ▸ Curvature). Geo needs Latitude and Longitude. Choosing a mode clears a pinned layout so the new mode can run." },
         { control: "note", label: "Hierarchy inferred from link connectivity. Add a Node parent field when the report needs an exact business hierarchy.",
@@ -475,6 +482,7 @@ export const SB_CATS: SBCategory[] = [
             disabledReason: "Add valid Latitude and Longitude data to enable the outline map.",
             visibleIf: (g) => String(g("layout.mode")) === "geo" },
         { control: "switch", label: "Pin layout", key: "pin.pinned",
+            dimIf: proLocked, disabledReason: PRO_REASON,
             info: "Freezes and saves the current node positions so refreshes and report reopenings reuse them. Dragging a node also pins the authored layout. Turn this off—or choose another layout mode—to calculate positions again." },
     ] }] },
     { id: "nodes", name: "Nodes", subs: [
@@ -523,6 +531,7 @@ export const SB_CATS: SBCategory[] = [
         { id: "nodesPatterns", name: "Patterns", kind: "fields", width: 320, fields: [
             { control: "segText", label: "Apply pattern", key: "nodes.fillPatternMode",
                 options: [opt("all", "All nodes"), opt("level", "By level")],
+                dimIf: proLocked, disabledReason: PRO_REASON,
                 note: "By level gives each hierarchy depth its own fill texture. Uses the Node-parent role, or a derived tree when unbound." },
             { control: "tiles", label: "Pattern", key: "nodes.fillPattern",
                 options: PATTERN_OPTIONS, tileIcons: PATTERN_ICONS, tileColumns: 4,
@@ -541,6 +550,7 @@ export const SB_CATS: SBCategory[] = [
         ] },
         { id: "nodesIcons", name: "Icons", kind: "fields", width: 440, fields: [
             { control: "segText", label: "Apply icon", key: "nodes.iconMode",
+                dimIf: proLocked, disabledReason: PRO_REASON,
                 options: [opt("all", "All nodes"),
                     depOpt("type", "By node type", (g) => !g("@hasCategory"), "Add data to the Node category field well to enable this option."),
                     depOpt("field", "By field value", (g) => !g("@hasIcon"), "Add data to the Icon field well to enable this option."),
@@ -574,7 +584,8 @@ export const SB_CATS: SBCategory[] = [
         // defines which nodes are "parents"). Without it the toggle would silently no-op, so
         // gate the whole group on `@hasParent`: dim it and show a hint pointing at the role.
         { id: "nodesParents", name: "Parents", kind: "fields", fields: [
-            { control: "switch", label: "Emphasise parents", key: "parents.show", dimIf: (g) => !g("@hasParent"),
+            { control: "switch", label: "Emphasise parents", key: "parents.show", dimIf: (g) => proLocked(g) || !g("@hasParent"),
+                disabledReasonFn: (g) => proLocked(g) ? PRO_REASON : undefined,
                 noteFn: (g) => (g("@hasParent") ? undefined : "Add a Node parent field to enable parent styling."),
                 info: "Styles nodes that act as parents in an explicit hierarchy. Bind a Node parent field first, then turn this on to enable the border, fill, and size controls below." },
             { control: "color", label: "Border", key: "parents.borderColor", dimIf: (g) => !g("@hasParent") || !g("parents.show"),
@@ -591,9 +602,9 @@ export const SB_CATS: SBCategory[] = [
             { control: "select", label: "Click action", key: "nodes.clickMode",
                 options: [
                     opt("filter", "Cross-filter only"),
-                    opt("info", "Show full info"),
-                    depOpt("expand", "Expand / collapse", (g) => !g("@licensed"), PRO_REASON),
-                    depOpt("drilldown", "Drill-down", (g) => !g("@licensed"), PRO_REASON)],
+                    depOpt("info", "Show full info", proLocked, PRO_REASON),
+                    depOpt("expand", "Expand / collapse", proLocked, PRO_REASON),
+                    depOpt("drilldown", "Drill-down", proLocked, PRO_REASON)],
                 info: "A node click does exactly one thing. Cross-filter only keeps the standard report interaction; the other three each take over the click, so cross-filtering may not fire while one is active. Show full info opens the node detail panel; Expand / collapse folds a parent's descendants; Drill-down makes the clicked node the temporary root. Expand and Drill-down follow the bound Node parent, or a hierarchy derived from link connectivity." },
             { control: "switch", label: "Start collapsed", key: "hierarchy.startCollapsed",
                 visibleIf: (g) => String(g("nodes.clickMode")) === "expand",
@@ -611,7 +622,7 @@ export const SB_CATS: SBCategory[] = [
                 opt("single", "Single"),
                 depOpt("category", "Category", (g) => !g("@hasCategory"), "Add data to the Node category field well to enable Category."),
                 opt("measure", "Value"),
-                opt("cluster", "Community"), opt("component", "Component"), opt("level", "Level")],
+                depOpt("cluster", "Community", proLocked, PRO_REASON), depOpt("component", "Component", proLocked, PRO_REASON), opt("level", "Level")],
                 info: "Single uses Nodes → Style → Colour. Category needs a Node category field. Value uses the Colour driver below. Community detects densely connected groups, Component separates disconnected subnetworks, and Level uses the Node parent hierarchy or a derived hierarchy. A custom gradient or matching conditional rule overrides this base mode." },
             // Structural continuous drivers (Hub / Bridge / Influence) live here — the headline.
             { control: "select", label: "Colour driver", key: "colors.driver",
@@ -653,6 +664,7 @@ export const SB_CATS: SBCategory[] = [
             // driver value (lowest = Start, highest = End), and it OVERRIDES "Colour by".
             // Start/End reuse the classic gLow/gHigh keys; Midpoints adds 0–5 stops between.
             { control: "switch", label: "Custom node gradient", key: "colors.customGradient",
+                dimIf: proLocked, disabledReason: PRO_REASON,
                 info: "Paint every node along your own Start → End ramp, positioned by the Colour driver (Mode tab). Overrides “Colour by”." },
             { control: "select", label: "Colour driver", key: "colors.driver",
                 options: [
@@ -738,8 +750,8 @@ export const SB_CATS: SBCategory[] = [
                 : "Turn on Link labels to choose their content.",
             note: "Betweenness = share of shortest paths crossing the link (computed up to 2,000 nodes)" },
         { control: "switch", label: "Animate flow", key: "edges.flow",
-            dimIf: (g) => !g("edges.show"),
-            disabledReason: "Turn on Show links to animate their flow." },
+            dimIf: (g) => !g("edges.show") || proLocked(g),
+            disabledReasonFn: (g) => proLocked(g) ? PRO_REASON : "Turn on Show links to animate their flow." },
         { control: "slider", label: "Flow speed", key: "edges.flowSpeed", min: 1, max: 10, step: 1,
             dimIf: (g) => !g("edges.show") || !g("edges.flow"),
             disabledReasonFn: (g) => !g("edges.show")
@@ -752,7 +764,7 @@ export const SB_CATS: SBCategory[] = [
             { control: "switch", label: "Show outer label", key: "labels.show" },
             { control: "select", label: "Content", key: "labels.content",
                 options: [opt("name", "Name"), opt("value", "Value"), opt("nameValue", "Name (value)"),
-                    opt("inflow", "Inflow"), opt("outflow", "Outflow"), opt("flow", "Total flow")],
+                    depOpt("inflow", "Inflow", proLocked, PRO_REASON), depOpt("outflow", "Outflow", proLocked, PRO_REASON), depOpt("flow", "Total flow", proLocked, PRO_REASON)],
                 dimIf: (g) => !g("labels.show"),
                 disabledReason: "Turn on Show outer label to choose its content.",
                 note: "Flow modes total the directed edge weights in/out of each node" },
@@ -790,7 +802,8 @@ export const SB_CATS: SBCategory[] = [
             { control: "color", label: "Colour", key: "labels.color",
                 dimIf: (g) => !g("labels.show"), disabledReason: "Turn on Show outer label to change its colour." },
             { control: "switch", label: "Background", key: "labels.bgShow",
-                dimIf: (g) => !g("labels.show"), disabledReason: "Turn on Show outer label to add a background." },
+                dimIf: (g) => proLocked(g) || !g("labels.show"),
+                disabledReasonFn: (g) => proLocked(g) ? PRO_REASON : "Turn on Show outer label to add a background." },
             { control: "select", label: "Bg style", key: "labels.bgType", options: [opt("card", "Card"), opt("highlight", "Highlight"), opt("pill", "Pill")],
                 dimIf: (g) => !g("labels.show") || !g("labels.bgShow"),
                 disabledReasonFn: (g) => !g("labels.show")
@@ -812,8 +825,8 @@ export const SB_CATS: SBCategory[] = [
             // These three persisted node-value settings keep their existing keys for
             // bookmark compatibility; only their gear placement moves into Labels.
             { control: "switch", label: "Show inner label", key: "nodes.showValue",
-                dimIf: canvasWillRender,
-                disabledReason: "Inner labels require SVG rendering. Choose SVG or raise the Auto Canvas threshold." },
+                dimIf: (g) => proLocked(g) || canvasWillRender(g),
+                disabledReasonFn: (g) => proLocked(g) ? PRO_REASON : "Inner labels require SVG rendering. Choose SVG or raise the Auto Canvas threshold." },
             { control: "segText", label: "Value", key: "nodes.valueSource",
                 options: [
                     opt("size", "Node value"),
@@ -865,7 +878,7 @@ export const SB_CATS: SBCategory[] = [
     ] },
     { id: "filter", name: "Filter", flat: true, subs: [{ id: "filter", kind: "fields", fields: [
         { control: "segText", label: "Show", key: "rank.mode", options: [opt("off", "All"), opt("top", "Top N"), opt("bottom", "Bottom N")] },
-        { control: "segText", label: "Action", key: "rank.action", options: [opt("filter", "Filter"), opt("highlight", "Highlight")],
+        { control: "segText", label: "Action", key: "rank.action", options: [opt("filter", "Filter"), depOpt("highlight", "Highlight", proLocked, PRO_REASON)],
             dimIf: (g) => String(g("rank.mode")) === "off",
             disabledReason: "Choose Top N or Bottom N under Show to enable ranking actions.",
             info: "Filter shows only the ranked N nodes and re-lays out that subgraph. Highlight keeps the complete network in place, accents the ranked N nodes, and dims the rest." },
@@ -883,6 +896,7 @@ export const SB_CATS: SBCategory[] = [
     ] }] },
     { id: "cformat", name: "Rules", flat: true, subs: [{ id: "cformat", kind: "fields", fields: [
         { control: "switch", label: "Rules editor", key: "cf.show",
+            dimIf: proLocked, disabledReason: PRO_REASON,
             info: "Shows or hides the rule editor panel. Existing enabled rules continue colouring nodes even when the editor itself is hidden. Rules override the base Colours mode when their conditions match." },
         { control: "heading", label: "Colour nodes by any number of rules — numeric (degree, centrality…) or text (name, category)." },
     ] }] },
@@ -897,8 +911,9 @@ export const SB_CATS: SBCategory[] = [
             { control: "select", label: "Node information", key: "tooltip.content",
                 options: [
                     depOpt("business", "Business fields", (g) => !g("@hasTooltips"), "Add data to the Tooltips field well to enable Business fields."),
-                    depOpt("combined", "Business + network", (g) => !g("@hasTooltips"), "Add data to the Tooltips field well to enable Business + network."),
-                    opt("network", "Network metrics")],
+                    { value: "combined", label: "Business + network", disabledIf: (g) => proLocked(g) || !g("@hasTooltips"),
+                        disabledReasonFn: (g) => proLocked(g) ? PRO_REASON : "Add data to the Tooltips field well to enable Business + network." },
+                    depOpt("network", "Network metrics", proLocked, PRO_REASON)],
                 dimIf: (g) => String(g("tooltip.type")) === "off",
                 disabledReason: "Choose Zentrix card or Native tooltip style to configure node information.",
                 info: "Controls the node hover card. Add report fields to the Tooltips data well, then choose whether they replace or supplement network metrics." },
@@ -907,7 +922,7 @@ export const SB_CATS: SBCategory[] = [
         { id: "ovViews", name: "View switch", kind: "fields", fields: [
             { control: "switch", label: "Summary table", key: "summaryTable.show" },
             { control: "switch", label: "Insights", key: "insights.show",
-                dimIf: (g) => !g("@licensed"), disabledReason: PRO_REASON,
+                dimIf: proLocked, disabledReason: PRO_REASON,
                 note: "A plain-English read-out of the network — hubs, connectivity, bridges, density" },
             { control: "select", label: "Position", key: "summaryTable.position", options: POS5,
                 dimIf: (g) => !g("summaryTable.show") && !g("insights.show"),
@@ -939,19 +954,16 @@ export const SB_CATS: SBCategory[] = [
                 disabledReason: "Enable a node or edge legend that has the required data before choosing its position.",
                 info: "Has an effect when a renderable node or edge legend is on. Auto chooses a corner that avoids other overlays." },
         ] },
-        { id: "ovToolbar", name: "Gear icon", kind: "fields", fields: [
-            { control: "switch", label: "Show settings bar", key: "bar.show" },
-            { control: "select", label: "Gear position", key: "bar.pos", options: POS_BAR, dimIf: (g) => !g("bar.show"),
-                info: "Has an effect only when Show settings bar is on. Auto places the gear to avoid other overlays." },
-            { control: "switch", label: "Quick actions (zoom, undo, redo, reset)", key: "bar.actions",
-                info: "Shows compact zoom, visual-wide undo/redo, focus, and layout-reset actions independently of the settings gear." },
-            { control: "switch", label: "Close on click-away", key: "bar.closeAway", dimIf: (g) => !g("bar.show"),
-                info: "Has an effect only when Show settings bar is on. When enabled, clicking the graph closes an open settings card." },
-        ] },
+        // NOTE: the "Gear icon" sub was removed from the in-visual gear (CEO 2026-08-05).
+        // The toolbar controls (Show settings bar, Gear position, Quick actions, Close on
+        // click-away) live ONLY in the native Format pane now — `toolbar` is a PANE_CARD, so
+        // they stay fully editable there. Keeping "Show settings bar" out of the gear also
+        // avoids the trap of switching the gear off from inside the gear. The `bar.*` engine
+        // keys remain in KEYS (used by the native pane + rerenderFromSettings).
     ] },
     { id: "enterprise", name: "Enterprise", subs: [
         { id: "clusters", name: "Clusters", kind: "fields", fields: [
-            { control: "switch", label: "Show clusters", key: "clusters.show", dimIf: (g) => !g("@licensed"), disabledReason: PRO_REASON },
+            { control: "switch", label: "Show clusters", key: "clusters.show", dimIf: entLocked, disabledReason: ENT_REASON },
             { control: "select", label: "Cluster by", key: "clusters.clusterBy",
                 options: [opt("auto", "Auto (communities)"),
                     depOpt("category", "Category field", (g) => !g("@hasCategory"), "Add data to the Node category field well to enable Category field."),
@@ -1068,26 +1080,29 @@ export const SB_CATS: SBCategory[] = [
         ] },
         { id: "scale", name: "Scale", kind: "fields", fields: [
             { control: "select", label: "Renderer", key: "scale.renderMode", options: [opt("auto", "Auto"), opt("svg", "SVG (interactive)"), opt("canvas", "Canvas (fast)")],
+                dimIf: entLocked, disabledReason: ENT_REASON,
                 info: "Auto uses SVG below the Canvas threshold and Canvas above it. SVG keeps the richest per-element interaction; Canvas is faster for large graphs. Time animation is available only in SVG mode." },
             { control: "slider", label: "Canvas above (nodes)", key: "scale.canvasThreshold", min: 200, max: 20000, step: 100,
                 note: "Auto switches to canvas past this node count", dimIf: (g) => String(g("scale.renderMode")) !== "auto",
                 disabledReason: "Set Renderer to Auto to configure the Canvas threshold." },
             { control: "slider", label: "Max edges (0 = All)", key: "scale.maxEdges", min: 0, max: 50000, step: 100,
+                dimIf: entLocked, disabledReason: ENT_REASON,
                 info: "Defaults to All so every available relationship between shown nodes is retained. Set a positive value only when you deliberately want a performance cap; Load beyond 30k rows requests additional Power BI data windows until all rows or that cap is reached." },
             { control: "switch", label: "Load beyond 30k rows", key: "scale.fetchMore",
+                dimIf: entLocked, disabledReason: ENT_REASON,
                 note: "Requests more data windows until all rows or the explicit Max-edges cap is reached" },
-            { control: "switch", label: "Minimap", key: "scale.minimap", dimIf: (g) => !g("@licensed"), disabledReason: PRO_REASON },
+            { control: "switch", label: "Minimap", key: "scale.minimap", dimIf: entLocked, disabledReason: ENT_REASON },
         ] },
         { id: "analysis", name: "Analysis", kind: "fields", fields: [
             { control: "select", label: "Importance", key: "centrality.metric", options: [opt("none", "Off"), opt("degree", "Degree"), opt("betweenness", "Bridges"), opt("closeness", "Reach"), opt("pagerank", "Influence")],
-                dimIf: (g) => !g("@licensed"), disabledReason: PRO_REASON,
+                dimIf: proLocked, disabledReason: PRO_REASON,
                 info: "Calculates node importance for size, labels, colour, rules, filtering, and tooltips. Degree counts links; Bridges finds connectors between groups (betweenness); Reach favours nodes close to all others (closeness); Influence favours links from important nodes (PageRank)." },
-            { control: "switch", label: "Search box", key: "find.show", dimIf: (g) => !g("@licensed"), disabledReason: PRO_REASON },
+            { control: "switch", label: "Search box", key: "find.show" },
             { control: "switch", label: "Explore mode", key: "explore.show",
-                dimIf: (g) => !g("@licensed"), disabledReason: PRO_REASON,
+                dimIf: entLocked, disabledReason: ENT_REASON,
                 info: "Adds an exploration control for focusing on a selected node and its neighbourhood. It changes the visible subgraph, not the underlying data." },
             { control: "switch", label: "Path analysis", key: "path.show",
-                dimIf: (g) => !g("@licensed"), disabledReason: PRO_REASON,
+                dimIf: entLocked, disabledReason: ENT_REASON,
                 info: "Adds controls for selecting two nodes and highlighting the shortest path between them." },
             { control: "switch", label: "Use link values", key: "path.weighted",
                 dimIf: (g) => !g("path.show") || !g("@hasWeight"),
@@ -1096,16 +1111,17 @@ export const SB_CATS: SBCategory[] = [
                     : "Add data to the Edge weight field well to use link values as path costs.",
                 info: "Has an effect only when Path analysis is on. It uses the bound Edge weight values as path costs and finds the lowest-cost route; without usable values, the fewest-links route is used." },
             { control: "switch", label: "Time animation", key: "temporal.show",
-                dimIf: (g) => !g("@licensed") || !g("@hasTime") || canvasWillRender(g)
+                dimIf: (g) => entLocked(g) || !g("@hasTime") || canvasWillRender(g)
                     || (!!g("clusters.show") && !!g("clusters.collapse")),
-                disabledReasonFn: (g) => !g("@licensed") ? PRO_REASON
+                disabledReasonFn: (g) => entLocked(g)
+                    ? ENT_REASON
                     : !g("@hasTime")
-                    ? "Add valid data to the Time field well to enable time animation."
-                    : !!g("clusters.show") && !!g("clusters.collapse")
-                        ? "Turn off Collapse to meta-nodes to animate the original timed links."
-                        : "Time animation requires SVG rendering. Choose SVG or raise the Auto Canvas threshold.",
+                        ? "Add valid data to the Time field well to enable time animation."
+                        : !!g("clusters.show") && !!g("clusters.collapse")
+                            ? "Turn off Collapse to meta-nodes to animate the original timed links."
+                            : "Time animation requires SVG rendering. Choose SVG or raise the Auto Canvas threshold.",
                 info: "Requires a Time field and SVG rendering. It adds a time slider that reveals nodes and links across the bound time range; it stays hidden when no valid time values exist or Canvas rendering is active." },
-            { control: "switch", label: "Show annotations", key: "annotations.show" },
+            { control: "switch", label: "Show annotations", key: "annotations.show", dimIf: entLocked, disabledReason: ENT_REASON },
             { control: "select", label: "Annotation style", key: "annotations.defaultMode", options: [opt("marker", "Marker"), opt("text", "Text"), opt("arrow", "Text + arrow"), opt("all", "All")],
                 dimIf: (g) => !g("annotations.show"),
                 disabledReason: "Turn on Show annotations to choose the annotation tools.",

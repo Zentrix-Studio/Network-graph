@@ -194,8 +194,8 @@ export function buildGraphData(
          *  node. The FIRST-SEEN spelling stays the display/natural key, so pin
          *  blobs and annotations anchored before the merge keep matching it. */
         mergeDuplicates?: boolean;
-        /** Free-tier node cap (NG-266): stop introducing new nodes past this many,
-         *  keeping edges among those already shown. Reported via `nodeCap`. */
+        /** Node cap: stop introducing new nodes past this many, keeping edges among those
+         *  already shown. Reported via `nodeCap`. Defaults to Infinity (uncapped). */
         maxNodes?: number;
     },
 ): GraphData {
@@ -206,8 +206,8 @@ export function buildGraphData(
     // Merge is ON unless explicitly disabled — mirrors the product default (settings.ts)
     // so direct callers and the live visual agree on the standard "one node per name" view.
     const merge = opts?.mergeDuplicates ?? true;
-    // Free-tier node cap (NG-266): the honest max-node budget. Beyond it, edges that would
-    // introduce a NEW node are dropped and reported via `nodeCap`; edges among shown nodes stay.
+    // Node cap: the honest max-node budget. Beyond it, edges that would introduce a NEW node
+    // are dropped and reported via `nodeCap`; edges among shown nodes stay.
     const maxNodes = opts?.maxNodes ?? Infinity;
     const allNodeKeys = new Set<string>(); // every distinct node in the data (for the honest total)
     let nodeCapped = false;
