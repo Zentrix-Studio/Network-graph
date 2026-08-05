@@ -41,7 +41,7 @@ import { computeNarrative, InsightAction, articulationFlags } from "./insights/g
 import {
     renderGraph, fitTransform, drawLabels, makeEdgeWidth, GraphGeometry, GraphRenderOptions,
     LabelPosition, LabelWrap, LabelBgType, NodeShape, edgeCurvePath, pairPerp, trimEdgeEnds,
-    selfLoopPath, edgeLabelPlacement,
+    selfLoopPath, edgeLabelPlacement, iconGroupTransform,
 } from "./render/graph";
 import { drawGraph as drawGraphCanvas, pickNodeAt, Ctx2D } from "./render/canvasGraph";
 import { renderBasemap } from "./render/worldOutline";
@@ -879,6 +879,7 @@ export class Visual implements IVisual {
                 hasTime: data0.hasTime,
                 hasTooltips: data0.hasTooltips,
                 hasGeo: data0.attrs.some((attr) => attr.lat != null && attr.lon != null),
+                hasImage: data0.attrs.some((attr) => attr.image != null),
                 canvasAvailable: !!this.ctx,
                 nodeCount: model.nodes.length,
                 edgeCount: model.links.length,
@@ -1154,8 +1155,11 @@ export class Visual implements IVisual {
         if (!g.allows("drilldown")) { s.hierarchy.foldable.value = false; s.hierarchy.drilldown.value = false; }
         if (!g.allows("highlightFilter") && String(s.ranking.action.value.value) === "highlight") setItem(s.ranking.action, "filter");
         if (!g.allows("rules")) s.cformat.show.value = false; // applied rules are also dropped where cfRules is built
-        if (!g.allows("icons")) { setItem(s.nodes.iconMode, "all"); s.nodes.icon.value = ""; }
-        if (!g.allows("patterns")) { setItem(s.nodes.fillPatternMode, "all"); setItem(s.nodes.fillPattern, "none"); }
+        // Icons/patterns: applying ONE icon/pattern to ALL nodes is free; only the
+        // differentiated per-group modes are Pro. So downgrade the MODE to "all" for free —
+        // keep the chosen icon/pattern so uniform styling still works.
+        if (!g.allows("iconByGroup") && String(s.nodes.iconMode.value.value) !== "all") setItem(s.nodes.iconMode, "all");
+        if (!g.allows("patternByLevel") && String(s.nodes.fillPatternMode.value.value) === "level") setItem(s.nodes.fillPatternMode, "all");
         if (!g.allows("innerLabels")) s.nodes.showValue.value = false;
         if (!g.allows("labelBg")) s.labels.bgShow.value = false;
         if (!g.allows("networkTooltip")) {
@@ -1581,6 +1585,12 @@ export class Visual implements IVisual {
             // Only render base64 data: images — NEVER an external URL, so the code
             // provably makes no external call (certifiable by construction).
             imageOf: (i) => { const im = st.data.attrs[i]?.image; return im && im.startsWith("data:") ? im : null; },
+            // Node-image appearance (Nodes → Image tab): fit, and an optional border ring
+            // (blank colour = the node's own colour).
+            imageFit: (s.nodeImages.fit.value.value as string) === "contain" ? "contain" : "cover",
+            imageBorder: s.nodeImages.showBorder.value,
+            imageBorderColor: (s.nodeImages.borderColor.value.value as string) || null,
+            imageBorderWidth: s.nodeImages.borderWidth.value,
             iconOf,
             nodeFillPatternOf: fillPatternOf,
             labelOf: this.makeNodeLabel(st),
@@ -2183,11 +2193,10 @@ export class Visual implements IVisual {
         const current = initial.map((p) => ({ x: p.x, y: p.y }));
         this.nodeGroup.selectAll<SVGGraphicsElement, number>(".node").each(function (i) {
             const el = select(this);
-            if (this.tagName.toLowerCase() === "circle") {
-                el.attr("cx", initial[i].x).attr("cy", initial[i].y);
-            } else {
-                el.attr("transform", `translate(${initial[i].x},${initial[i].y})`);
-            }
+            const tag = this.tagName.toLowerCase();
+            if (tag === "circle") el.attr("cx", initial[i].x).attr("cy", initial[i].y);
+            else if (tag === "g") el.attr("transform", iconGroupTransform(initial[i].x, initial[i].y, radiusOf(i)));
+            else el.attr("transform", `translate(${initial[i].x},${initial[i].y})`);
             el.classed("zx-new-node", isNew.has(i));
         });
 
@@ -2232,6 +2241,7 @@ export class Visual implements IVisual {
                 const p = current[i];
                 const el = select(this);
                 if (this.tagName.toLowerCase() === "circle") el.attr("cx", p.x).attr("cy", p.y);
+                else if (this.tagName.toLowerCase() === "g") el.attr("transform", iconGroupTransform(p.x, p.y, radiusOf(i)));
                 else el.attr("transform", `translate(${p.x},${p.y})`);
             });
             this.edgeGroup.selectAll<SVGPathElement, number>("path.edge, path.edge-hit")
@@ -2375,6 +2385,7 @@ export class Visual implements IVisual {
                 const p = current[i];
                 const el = select(this);
                 if (this.tagName.toLowerCase() === "circle") el.attr("cx", p.x).attr("cy", p.y);
+                else if (this.tagName.toLowerCase() === "g") el.attr("transform", iconGroupTransform(p.x, p.y, radiusOf(i)));
                 else el.attr("transform", `translate(${p.x},${p.y})`);
             });
             this.edgeGroup.selectAll<SVGPathElement, number>("path.edge, path.edge-hit")

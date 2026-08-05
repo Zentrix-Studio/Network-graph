@@ -123,6 +123,11 @@ const KEYS: Record<string, Entry> = {
     "parents.borderWidth": num("parents", "borderWidth", (m) => m.parents.borderWidth),
     "parents.fill": color("parents", "fill", (m) => m.parents.fill),
     "parents.sizeBoost": num("parents", "sizeBoost", (m) => m.parents.sizeBoost),
+
+    "image.fit": dropdown("nodeImages", "fit", (m) => m.nodeImages.fit),
+    "image.border": bool("nodeImages", "showBorder", (m) => m.nodeImages.showBorder),
+    "image.borderColor": color("nodeImages", "borderColor", (m) => m.nodeImages.borderColor),
+    "image.borderWidth": num("nodeImages", "borderWidth", (m) => m.nodeImages.borderWidth),
     "nodes.animate": bool("nodes", "animate", (m) => m.nodes.animate),
     "nodes.initialAnimation": bool("nodes", "initialAnimation", (m) => m.nodes.initialAnimation),
     "nodes.collide": bool("nodes", "collide", (m) => m.nodes.collide),
@@ -530,8 +535,7 @@ export const SB_CATS: SBCategory[] = [
         ] },
         { id: "nodesPatterns", name: "Patterns", kind: "fields", width: 320, fields: [
             { control: "segText", label: "Apply pattern", key: "nodes.fillPatternMode",
-                options: [opt("all", "All nodes"), opt("level", "By level")],
-                dimIf: proLocked, disabledReason: PRO_REASON,
+                options: [opt("all", "All nodes"), depOpt("level", "By level", proLocked, PRO_REASON)],
                 note: "By level gives each hierarchy depth its own fill texture. Uses the Node-parent role, or a derived tree when unbound." },
             { control: "tiles", label: "Pattern", key: "nodes.fillPattern",
                 options: PATTERN_OPTIONS, tileIcons: PATTERN_ICONS, tileColumns: 4,
@@ -550,11 +554,12 @@ export const SB_CATS: SBCategory[] = [
         ] },
         { id: "nodesIcons", name: "Icons", kind: "fields", width: 440, fields: [
             { control: "segText", label: "Apply icon", key: "nodes.iconMode",
-                dimIf: proLocked, disabledReason: PRO_REASON,
                 options: [opt("all", "All nodes"),
-                    depOpt("type", "By node type", (g) => !g("@hasCategory"), "Add data to the Node category field well to enable this option."),
-                    depOpt("field", "By field value", (g) => !g("@hasIcon"), "Add data to the Icon field well to enable this option."),
-                    opt("level", "By hierarchy level")],
+                    { value: "type", label: "By node type", disabledIf: (g) => proLocked(g) || !g("@hasCategory"),
+                        disabledReasonFn: (g) => proLocked(g) ? PRO_REASON : "Add data to the Node category field well to enable this option." },
+                    { value: "field", label: "By field value", disabledIf: (g) => proLocked(g) || !g("@hasIcon"),
+                        disabledReasonFn: (g) => proLocked(g) ? PRO_REASON : "Add data to the Icon field well to enable this option." },
+                    depOpt("level", "By hierarchy level", proLocked, PRO_REASON)],
                 noteFn: (g) => {
                     const mode = String(g("nodes.iconMode"));
                     if (mode === "type") return g("@hasCategory")
@@ -579,6 +584,18 @@ export const SB_CATS: SBCategory[] = [
                 visibleIf: (g) => String(g("nodes.iconMode")) === "level" },
             { control: "emoji", label: "Level 4+", key: "nodes.iconL4",
                 visibleIf: (g) => String(g("nodes.iconMode")) === "level" },
+        ] },
+        { id: "nodesImage", name: "Image", kind: "fields", fields: [
+            { control: "note", label: "Bind a Node image field (a base64 data: URI) to render images in place of node markers.",
+                visibleIf: (g) => !g("@hasImage") },
+            { control: "segText", label: "Fit", key: "image.fit", options: [opt("cover", "Fill"), opt("contain", "Fit")],
+                note: "Fill crops the image to cover the circle; Fit shows the whole image inside it." },
+            { control: "switch", label: "Border", key: "image.border" },
+            { control: "color", label: "Border colour", key: "image.borderColor", dimIf: (g) => !g("image.border"),
+                disabledReason: "Turn on Border to choose its colour.",
+                info: "Leave blank to match each node's own colour." },
+            { control: "slider", label: "Border width", key: "image.borderWidth", min: 0, max: 12, step: 1, suffix: "px",
+                dimIf: (g) => !g("image.border"), disabledReason: "Turn on Border to set its width." },
         ] },
         // Parent emphasis only has an effect once a Node-parent field is bound (that's what
         // defines which nodes are "parents"). Without it the toggle would silently no-op, so

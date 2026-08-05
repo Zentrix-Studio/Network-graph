@@ -32,6 +32,13 @@ export type LabelWrap = "off" | "on" | "auto";
 export type LabelBgType = "card" | "highlight" | "pill";
 export type NodeShape = "circle" | "square" | "diamond" | "triangle" | "hexagon" | "donut";
 
+/** Transform that centers a 24×24 semantic-icon `<g>` at (x,y) sized to radius r.
+ *  Shared by the initial render AND the motion animation so a mid-flight icon stays
+ *  centered + correctly scaled (not left at native size, top-left-anchored). */
+export function iconGroupTransform(x: number, y: number, r: number): string {
+    return `translate(${x},${y}) scale(${r / 12}) translate(-12,-12)`;
+}
+
 /** Any node marker element (circle for the default shape, path for the rest). */
 type NodeSel = Selection<SVGGraphicsElement, number, SVGGElement, unknown>;
 
@@ -54,6 +61,14 @@ export interface GraphRenderOptions {
     /** Per-node base64 data: image URI to render in place of the marker, or null.
      *  MUST be a data: URI — the visual guards this so it never fetches externally. */
     imageOf?: (i: number) => string | null;
+    /** Node-image fit: "cover" fills the circle and crops; "contain" fits the whole image. */
+    imageFit?: "cover" | "contain";
+    /** Draw a border ring around image nodes. */
+    imageBorder?: boolean;
+    /** Ring colour; null = use each node's own colour. */
+    imageBorderColor?: string | null;
+    /** Ring width in px. */
+    imageBorderWidth?: number;
     /** Per-node semantic icon id or legacy glyph rendered in place of the marker.
      *  A base64 image still wins over the icon. */
     iconOf?: (i: number) => string | null;
@@ -504,6 +519,14 @@ export function renderGraph(
     const iconOf = opts.iconOf;
     // Fill patterns: clear last render's pattern defs, then create tinted ones on demand.
     defs.selectAll("pattern.zx-fill").remove();
+    // Deterministic circular clip for image nodes: an objectBoundingBox circle always
+    // centred in the image's (square) box — no browser guesswork like CSS `circle(50%)`.
+    // Added once; referenced by every image marker via clip-path="url(#zx-node-img-clip)".
+    if (defs.select("#zx-node-img-clip").empty()) {
+        const cp = defs.append("clipPath").attr("id", "zx-node-img-clip").attr("clipPathUnits", "objectBoundingBox");
+        cp.append("circle").attr("cx", 0.5).attr("cy", 0.5).attr("r", 0.5);
+    }
+    const imageFit = opts.imageFit === "contain" ? "xMidYMid meet" : "xMidYMid slice";
     const applyFill = (el: Selection<SVGGraphicsElement, unknown, null, undefined>, i: number): void => {
         const col = opts.colorOf(i);
         const rawPattern = opts.nodeFillPatternOf ? opts.nodeFillPatternOf(i) : opts.nodeFillPattern;
@@ -555,13 +578,13 @@ export function renderGraph(
                 el.attr("href", imageOf!(i)!) // guaranteed a data: URI by the caller
                     .attr("x", -r).attr("y", -r).attr("width", 2 * r).attr("height", 2 * r)
                     .attr("transform", `translate(${p.x},${p.y})`)
-                    .attr("preserveAspectRatio", "xMidYMid slice")
-                    .style("clip-path", "circle(50%)");
+                    .attr("preserveAspectRatio", imageFit)
+                    .attr("clip-path", "url(#zx-node-img-clip)");
             } else if (t === "g") {
                 const semantic = getSemanticIcon(iconOf!(i));
                 if (!semantic) return;
                 const parentStroke = opts.parentStrokeOf ? opts.parentStrokeOf(i) : null;
-                el.attr("transform", `translate(${p.x},${p.y}) scale(${r / 12}) translate(-12,-12)`)
+                el.attr("transform", iconGroupTransform(p.x, p.y, r))
                     .attr("fill", "none")
                     .attr("stroke", parentStroke ? parentStroke.color : opts.colorOf(i))
                     .attr("stroke-width", parentStroke ? parentStroke.width : 1.8)
@@ -594,6 +617,26 @@ export function renderGraph(
                 applyFill(el, i);
             }
         });
+
+    // Image-node border ring (Nodes → Image). A decorative <circle> per image node, drawn
+    // AFTER the markers so it rims the clipped image. pointer-events none so hit-testing
+    // stays on the image marker. Blank colour = the node's own colour. r matches the clip
+    // radius so the ring hugs the image edge.
+    const ringNodes = opts.imageBorder && imageOf
+        ? model.nodes.map((n) => n.index).filter((i) => imageOf(i))
+        : [];
+    const ringWidth = Math.max(0, opts.imageBorderWidth ?? 2);
+    nodeGroup.selectAll<SVGCircleElement, number>("circle.zx-image-ring")
+        .data(ringWidth > 0 ? ringNodes : [])
+        .join("circle")
+        .classed("zx-image-ring", true)
+        .attr("cx", (i) => geo.px[i].x)
+        .attr("cy", (i) => geo.px[i].y)
+        .attr("r", (i) => opts.radiusOf(i))
+        .attr("fill", "none")
+        .attr("stroke", (i) => opts.imageBorderColor || opts.colorOf(i))
+        .attr("stroke-width", ringWidth)
+        .attr("pointer-events", "none");
 
     // --- Labels (degree-ranked, arithmetically thinned — no getBBox) ---
     labelGroup.selectAll("*").remove();

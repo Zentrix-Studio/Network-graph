@@ -70,8 +70,9 @@ export type Feature =
     | "flow"             // animated edge flow
     | "drilldown"        // drill-down / expand-collapse click actions
     | "highlightFilter"  // Top/Bottom-N "Highlight" action
-    | "icons"            // semantic node icons
-    | "patterns"         // node fill textures
+    | "iconByGroup"      // differentiated icon modes (by node type / field value / level);
+                         //   applying ONE icon to all nodes is free
+    | "patternByLevel"   // per-hierarchy-level fill textures; one pattern for all nodes is free
     | "innerLabels"      // in-node value labels
     | "labelBg"          // outer-label backgrounds (card / highlight / pill)
     | "networkTooltip"   // network-metrics tooltip content (business fields stay free)
@@ -91,15 +92,27 @@ export const FEATURE_TIER: Record<Feature, Tier> = {
     centrality: "pro", communityColor: "pro", gradientBuilder: "pro",
     rules: "pro", insights: "pro", flow: "pro",
     drilldown: "pro", highlightFilter: "pro",
-    icons: "pro", patterns: "pro", innerLabels: "pro", labelBg: "pro",
+    iconByGroup: "pro", patternByLevel: "pro", innerLabels: "pro", labelBg: "pro",
     networkTooltip: "pro", pin: "pro", parents: "pro", showFullInfo: "pro",
     flowLabels: "pro",
 };
 
-/** Free-tier data caps (Enterprise = uncapped via `fullGraph`). A capped graph
- *  shows the honest "showing N of M nodes" notice — never a blank/error state. */
+/** Per-tier data caps. A capped graph shows the honest "showing N of M nodes" notice —
+ *  never a blank/error state. Free is deliberately small; Pro gets the visual's full
+ *  interactive budget (2k nodes / 5k edges); Enterprise is uncapped (scale features). */
 export const FREE_NODE_CAP = 500;
 export const FREE_EDGE_CAP = 2000;
+export const PRO_NODE_CAP = 2000;
+export const PRO_EDGE_CAP = 5000;
+
+/** Node/edge render caps for a tier (Infinity = uncapped). */
+export function tierCaps(tier: Tier): { nodes: number; edges: number } {
+    switch (tier) {
+        case "enterprise": return { nodes: Infinity, edges: Infinity };
+        case "pro": return { nodes: PRO_NODE_CAP, edges: PRO_EDGE_CAP };
+        default: return { nodes: FREE_NODE_CAP, edges: FREE_EDGE_CAP };
+    }
+}
 
 /* ── go-paid configuration ── */
 /** TEST-ONLY tier override. Power BI Desktop (and any side-loaded, pre-publish visual)
@@ -201,10 +214,10 @@ export class LicenseGate {
     /** Whether a given feature is unlocked at the current tier. */
     allows(feature: Feature): boolean { return meetsTier(this.tier, FEATURE_TIER[feature]); }
 
-    /** Node cap for the current tier (Infinity when the full graph is unlocked). */
-    get nodeCap(): number { return this.allows("fullGraph") ? Infinity : FREE_NODE_CAP; }
-    /** Edge cap for the current tier (Infinity when the full graph is unlocked). */
-    get edgeCap(): number { return this.allows("fullGraph") ? Infinity : FREE_EDGE_CAP; }
+    /** Node cap for the current tier (Free 500, Pro 2k, Enterprise ∞). */
+    get nodeCap(): number { return tierCaps(this.tier).nodes; }
+    /** Edge cap for the current tier (Free 2k, Pro 5k, Enterprise ∞). */
+    get edgeCap(): number { return tierCaps(this.tier).edges; }
 
     /** Transient "this feature needs a licence" banner. Best-effort; fires only while
      *  gated (a fully-unlocked / fail-open session is a no-op). Uses Power BI's

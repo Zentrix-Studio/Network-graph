@@ -227,6 +227,24 @@ class ParentsCard extends Card {
     slices = [this.show, this.borderColor, this.borderWidth, this.fill, this.sizeBoost];
 }
 
+// Appearance for nodes that carry a bound Node-image (base64 data: URI). Cosmetic — free.
+class NodeImagesCard extends Card {
+    // Fill crops the image to fill the circle (avatar look); Fit shows the whole image.
+    fit = new ItemDropdown({
+        name: "fit", displayName: "Image fit",
+        items: [item("cover", "Fill (crop)"), item("contain", "Fit (whole image)")],
+        value: item("cover", "Fill (crop)"),
+    });
+    showBorder = new ToggleSwitch({ name: "showBorder", displayName: "Border", value: true });
+    // Blank = ring matches the node's resolved colour.
+    borderColor = new ColorPicker({ name: "borderColor", displayName: "Border colour (blank = node colour)", value: { value: "" } });
+    borderWidth = new NumUpDown({ name: "borderWidth", displayName: "Border width", value: 2 });
+
+    name = "nodeImages";
+    displayName = "Node images";
+    slices = [this.fit, this.showBorder, this.borderColor, this.borderWidth];
+}
+
 // --- Colours (R1: colour management) ----------------------------------------
 class ColorsCard extends Card {
     mode = new ItemDropdown({
@@ -235,7 +253,9 @@ class ColorsCard extends Card {
         // analytical edge Powerviz lacks. The gear groups these by intent; here they are flat.
         items: [item("single", "Single"), item("category", "Category"), item("measure", "Value (gradient)"),
             item("cluster", "Cluster"), item("component", "Component"), item("level", "By level")],
-        value: item("category", "Category"),
+        // Default to a single brand colour — the safe, predictable default. Colour-by
+        // category/community is opt-in (CEO 2026-08-06); it was surprising as a default.
+        value: item("single", "Single"),
     });
     palette = new ItemDropdown({
         name: "palette", displayName: "Palette",
@@ -774,6 +794,7 @@ export class VisualFormattingSettingsModel extends Model {
     pin = new PinCard();
     nodes = new NodesCard();
     parents = new ParentsCard();
+    nodeImages = new NodeImagesCard();
     colors = new ColorsCard();
     edges = new EdgesCard();
     tooltip = new TooltipCard();
@@ -794,7 +815,7 @@ export class VisualFormattingSettingsModel extends Model {
     toolbar = new ToolbarCard();
     branding = new BrandingCard();
 
-    cards = [this.layout, this.pin, this.nodes, this.parents, this.colors, this.edges, this.tooltip, this.labels, this.ranking, this.centrality,
+    cards = [this.layout, this.pin, this.nodes, this.parents, this.nodeImages, this.colors, this.edges, this.tooltip, this.labels, this.ranking, this.centrality,
         this.cformat, this.clusters, this.hierarchy, this.scale, this.insights, this.find, this.explore, this.path, this.temporal, this.annotations, this.summaryTable, this.toolbar, this.branding];
 
     constructor() {

@@ -643,6 +643,45 @@
                 }
             }
         },
+        "nodeImages": {
+            "displayName": "Node images",
+            "description": "Appearance of nodes that have a bound Node image (base64 data: URI).",
+            "properties": {
+                "fit": {
+                    "type": {
+                        "enumeration": [
+                            {
+                                "value": "cover",
+                                "displayName": "Fill (crop)"
+                            },
+                            {
+                                "value": "contain",
+                                "displayName": "Fit (whole image)"
+                            }
+                        ]
+                    }
+                },
+                "showBorder": {
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "borderColor": {
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "borderWidth": {
+                    "type": {
+                        "numeric": true
+                    }
+                }
+            }
+        },
         "colors": {
             "properties": {
                 "mode": {
